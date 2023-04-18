@@ -1,11 +1,14 @@
 import BN from 'bn.js'
 import chai from 'chai'
 import { ether, expectEvent, expectRevert } from '@openzeppelin/test-helpers'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 
-import { deployHub, evmMine, setNextBlockTimestamp } from './TestUtils'
+import { deployHub, evmMine, hardhatNodeChainId, setNextBlockTimestamp } from './TestUtils'
 
 import chaiAsPromised from 'chai-as-promised'
 import {
+  RelayRequest,
+  TypedRequestData,
   constants,
   defaultEnvironment,
   getEip712Signature,
@@ -19,11 +22,11 @@ import {
   StakeManagerInstance, TestPaymasterEverythingAcceptedInstance,
   TestRecipientInstance, TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
+
 import { RelayRegistrarInstance } from '@opengsn/contracts'
 import { cleanValue } from './utils/chaiHelper'
+import { defaultGsnConfig } from '@opengsn/provider'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
 
 const { assert } = chai.use(chaiAsPromised)
 
@@ -39,9 +42,7 @@ contract('RelayHub Configuration',
   function ([relayHubDeployer, relayOwner, relayManager, relayWorker, senderAddress, other, dest, incorrectOwner]) { // eslint-disable-line no-unused-vars
     const message = 'Configuration'
     const unstakeDelay = 15000
-    const chainId = defaultEnvironment.chainId
-    const baseRelayFee = new BN('300')
-    const pctRelayFee = new BN('10')
+    const chainId = hardhatNodeChainId
     const gasPrice = new BN(1e9)
     const maxFeePerGas = new BN(1e9)
     const maxPriorityFeePerGas = new BN(1e9)
@@ -54,6 +55,10 @@ contract('RelayHub Configuration',
     const maxAcceptanceBudget = 10e6
     const deprecationTimeInSeconds = 100
     const stake = ether('2')
+
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
 
     let relayHub: RelayHubInstance
     let relayRegistrar: RelayRegistrarInstance
@@ -84,7 +89,7 @@ contract('RelayHub Configuration',
       await paymaster.setTrustedForwarder(forwarder)
       await paymaster.setRelayHub(relayHub.address)
       // Register hub's RelayRequest with forwarder, if not already done.
-      await registerForwarderForGsn(forwarderInstance)
+      await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarderInstance)
 
       await relayHub.depositFor(paymaster.address, {
         value: ether('1'),
@@ -99,7 +104,7 @@ contract('RelayHub Configuration',
       })
       await stakeManager.authorizeHubByOwner(relayManager, relayHub.address, { from: relayOwner })
       await relayHub.addRelayWorkers([relayWorker], { from: relayManager })
-      await relayRegistrar.registerRelayServer(relayHub.address, 0, pctRelayFee, splitRelayUrlForRegistrar(''), { from: relayManager })
+      await relayRegistrar.registerRelayServer(relayHub.address, splitRelayUrlForRegistrar(''), { from: relayManager })
       encodedFunction = recipient.contract.methods.emitMessage(message).encodeABI()
       relayRequest = {
         request: {
@@ -112,8 +117,6 @@ contract('RelayHub Configuration',
           validUntilTime: '0'
         },
         relayData: {
-          baseRelayFee: baseRelayFee.toString(),
-          pctRelayFee: pctRelayFee.toString(),
           transactionCalldataGasUsed: '0',
           maxFeePerGas: maxFeePerGas.toString(),
           maxPriorityFeePerGas: maxPriorityFeePerGas.toString(),
@@ -126,12 +129,13 @@ contract('RelayHub Configuration',
 
       }
       const dataToSign = new TypedRequestData(
+        defaultGsnConfig.domainSeparatorName,
         chainId,
         forwarder,
         relayRequest
       )
       signature = await getEip712Signature(
-        web3,
+        ethersProvider,
         dataToSign
       )
 
@@ -217,7 +221,7 @@ contract('RelayHub Configuration',
         await setNextBlockTimestamp(deprecationTime)
 
         await expectRevert(
-          relayHub.relayCall(maxAcceptanceBudget, relayRequest, signature, apporovalData, {
+          relayHub.relayCall(defaultGsnConfig.domainSeparatorName, maxAcceptanceBudget, relayRequest, signature, apporovalData, {
             from: relayWorker,
             gasPrice,
             gas: externalGasLimit
@@ -226,7 +230,7 @@ contract('RelayHub Configuration',
       })
 
       it('should not revert before deprecationBlock set', async function () {
-        const res = await relayHub.relayCall(maxAcceptanceBudget, relayRequest, signature, apporovalData, {
+        const res = await relayHub.relayCall(defaultGsnConfig.domainSeparatorName, maxAcceptanceBudget, relayRequest, signature, apporovalData, {
           from: relayWorker,
           gasPrice,
           gas: externalGasLimit
@@ -237,7 +241,7 @@ contract('RelayHub Configuration',
       it('should not revert before deprecationBlock passed', async function () {
         const newDeprecationTime = toNumber((await web3.eth.getBlock('latest')).timestamp) + deprecationTimeInSeconds
         await relayHub.deprecateHub(newDeprecationTime)
-        const res = await relayHub.relayCall(maxAcceptanceBudget, relayRequest, signature, apporovalData, {
+        const res = await relayHub.relayCall(defaultGsnConfig.domainSeparatorName, maxAcceptanceBudget, relayRequest, signature, apporovalData, {
           from: relayWorker,
           gasPrice,
           gas: externalGasLimit
@@ -265,7 +269,9 @@ contract('RelayHub Configuration',
             maxWorkerCount: 0xef.toString(),
             minimumUnstakeDelay: 0xef.toString(),
             devAddress: '0xeFEfeFEfeFeFEFEFEfefeFeFefEfEfEfeFEFEFEf',
-            devFee: 0x11.toString()
+            devFee: 0x11.toString(),
+            baseRelayFee: 0x11.toString(),
+            pctRelayFee: 0x11.toString()
           }
           let configFromHub = await relayHub.getConfiguration()
           // relayHub.getConfiguration() returns an array, so we need to construct an object with its fields to compare to config.
@@ -284,7 +290,9 @@ contract('RelayHub Configuration',
             minimumStake: 0xef.toString(),
             minimumUnstakeDelay: 0xef.toString(),
             devAddress: '0xeFEfeFEfeFeFEFEFEfefeFeFefEfEfEfeFEFEFEf',
-            devFee: '101'
+            devFee: '101',
+            baseRelayFee: '101',
+            pctRelayFee: '101'
           }
           await expectRevert(
             relayHub.setConfiguration(config, { from: relayHubOwner }),

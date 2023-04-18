@@ -1,8 +1,5 @@
-import { expectRevert } from '@openzeppelin/test-helpers'
-
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-
-require('source-map-support').install({ errorFormatterForce: true })
+import { RelayRequest } from '@opengsn/common'
+import { defaultGsnConfig } from '@opengsn/provider'
 
 const TestRelayHubValidator = artifacts.require('TestRelayHubValidator')
 
@@ -50,8 +47,6 @@ contract('RelayHubValidator', ([from, senderAddress, target, paymaster, relayWor
         relayData: {
           maxFeePerGas: '0',
           maxPriorityFeePerGas: '0',
-          pctRelayFee: '1',
-          baseRelayFee: '2',
           relayWorker,
           paymaster: paymaster,
           paymasterData: appended.paymasterData ?? '0x',
@@ -60,7 +55,9 @@ contract('RelayHubValidator', ([from, senderAddress, target, paymaster, relayWor
           forwarder
         }
       }
-      const verifyTransactionPacking = await validator.contract.methods.dummyRelayCall(0,
+      const verifyTransactionPacking = await validator.contract.methods.dummyRelayCall(
+        defaultGsnConfig.domainSeparatorName,
+        0,
         relayRequest,
         appended.signature ?? '0x',
         appended.approvalData ?? '0x')
@@ -75,35 +72,5 @@ contract('RelayHubValidator', ([from, senderAddress, target, paymaster, relayWor
         assert.equal(ret, '0x')
       }
     })
-  })
-
-  it('should reject signature too long', async () => {
-    const relayRequest: RelayRequest = {
-      request: {
-        from: senderAddress,
-        to: target,
-        value: '0',
-        gas: '1',
-        nonce: '2',
-        data: '0x',
-        validUntilTime: '0'
-      },
-      relayData: {
-        maxFeePerGas: '0',
-        maxPriorityFeePerGas: '0',
-        pctRelayFee: '1',
-        baseRelayFee: '2',
-        relayWorker,
-        paymaster: paymaster,
-        paymasterData: '0x',
-        clientId: '3',
-        transactionCalldataGasUsed: '4',
-        forwarder
-      }
-    }
-    await expectRevert(validator.dummyRelayCall(0,
-      relayRequest,
-      '0x' + '11'.repeat(66),
-      '0x'), 'invalid signature length')
   })
 })

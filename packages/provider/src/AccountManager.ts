@@ -1,14 +1,28 @@
 // @ts-ignore
 import ethWallet from 'ethereumjs-wallet'
-import Web3 from 'web3'
-import { recoverTypedSignature_v4, signTypedData_v4 } from 'eth-sig-util'
+import { JsonRpcProvider } from '@ethersproject/providers'
 import { PrefixedHexString } from 'ethereumjs-util'
+import { FeeMarketEIP1559Transaction, Transaction } from '@ethereumjs/tx'
+import {
+  SignTypedDataVersion,
+  TypedMessage,
+  personalSign,
+  recoverTypedSignature,
+  signTypedData
+} from '@metamask/eth-sig-util'
 
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
-import { Address, Web3ProviderBaseInterface } from '@opengsn/common/dist/types/Aliases'
+import {
+  Address,
+  RelayRequest,
+  RLPEncodedTransaction,
+  TypedRequestData,
+  getEip712Signature,
+  getRawTxOptions,
+  isSameAddress,
+  removeHexPrefix
+} from '@opengsn/common'
+
 import { GSNConfig } from './GSNConfigurator'
-import { getEip712Signature, isSameAddress, removeHexPrefix } from '@opengsn/common/dist/Utils'
 
 export interface AccountKeypair {
   privateKey: PrefixedHexString
@@ -21,18 +35,18 @@ function toAddress (privateKey: PrefixedHexString): Address {
 }
 
 export class AccountManager {
-  private readonly web3: Web3
+  private readonly provider: JsonRpcProvider
   private readonly accounts: AccountKeypair[] = []
   private readonly config: GSNConfig
   readonly chainId: number
 
-  constructor (provider: Web3ProviderBaseInterface, chainId: number, config: GSNConfig) {
-    this.web3 = new Web3(provider as any)
+  constructor (provider: JsonRpcProvider, chainId: number, config: GSNConfig) {
+    this.provider = provider
     this.chainId = chainId
     this.config = config
   }
 
-  addAccount (privateKey: PrefixedHexString): void {
+  addAccount (privateKey: PrefixedHexString): AccountKeypair {
     // TODO: backwards-compatibility 101 - remove on next version bump
     // addAccount used to accept AccountKeypair with Buffer in it
     // @ts-ignore
@@ -49,6 +63,7 @@ export class AccountManager {
       address
     }
     this.accounts.push(keypair)
+    return keypair
   }
 
   newAccount (): AccountKeypair {
@@ -62,12 +77,59 @@ export class AccountManager {
     }
   }
 
-  async sign (relayRequest: RelayRequest): Promise<PrefixedHexString> {
+  signMessage (message: string, from: Address): PrefixedHexString {
+    const keypair = this.accounts.find(account => isSameAddress(account.address, from))
+    if (keypair == null) {
+      throw new Error(`Account ${from} not found`)
+    }
+    const privateKey = Buffer.from(removeHexPrefix(keypair.privateKey), 'hex')
+    return personalSign({ privateKey, data: message })
+  }
+
+  signTransaction (transactionConfig: TransactionConfig, from: Address): RLPEncodedTransaction {
+    let transaction: Transaction | FeeMarketEIP1559Transaction
+    if (transactionConfig.chainId != null && transactionConfig.chainId !== this.chainId) {
+      throw new Error(`This provider is initialized for chainId ${this.chainId} but transaction targets chainId ${transactionConfig.chainId}`)
+    }
+    const commonTxOptions = getRawTxOptions(this.chainId, 0)
+    const fixGasLimitName = { ...transactionConfig, gasLimit: transactionConfig.gas }
+    if (transactionConfig.gasPrice != null) {
+      // annoying - '@ethereumjs/tx' imports BN.js@^4.x.x while we use ^5.x.x
+      // @ts-ignore
+      transaction = new Transaction(fixGasLimitName, commonTxOptions)
+    } else {
+      // @ts-ignore
+      transaction = new FeeMarketEIP1559Transaction(fixGasLimitName, commonTxOptions)
+    }
+    const privateKeyBuf = Buffer.from(removeHexPrefix(this.findPrivateKey(from)), 'hex')
+    const raw = '0x' + transaction.sign(privateKeyBuf).serialize().toString('hex')
+    // even more annoying is that 'RLPEncodedTransaction', which is expected return type here, is not yet 1559-ready
+    // @ts-ignore
+    return { raw, tx: transaction }
+  }
+
+  private findPrivateKey (from: Address): PrefixedHexString {
+    const keypair = this.accounts.find(account => isSameAddress(account.address, from))
+    if (keypair == null) {
+      throw new Error(`Account ${from} not found`)
+    }
+    return keypair.privateKey
+  }
+
+  signTypedData (typedMessage: TypedMessage<any>, from: Address): PrefixedHexString {
+    return this._signWithControlledKey(this.findPrivateKey(from), typedMessage)
+  }
+
+  async sign (
+    domainSeparatorName: string,
+    relayRequest: RelayRequest
+  ): Promise<PrefixedHexString> {
     let signature
     const forwarder = relayRequest.relayData.forwarder
 
     const cloneRequest = { ...relayRequest }
     const signedData = new TypedRequestData(
+      domainSeparatorName,
       this.chainId,
       forwarder,
       cloneRequest
@@ -82,9 +144,10 @@ export class AccountManager {
         signature = await this._signWithProvider(signedData)
       }
       // Sanity check only
-      rec = recoverTypedSignature_v4({
+      rec = recoverTypedSignature({
         data: signedData,
-        sig: signature
+        signature,
+        version: SignTypedDataVersion.V4
       })
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
@@ -97,20 +160,24 @@ export class AccountManager {
     return signature
   }
 
-  // These methods is extracted to
+  // These methods are extracted to
   // a) allow different implementations in the future, and
   // b) allow spying on Account Manager in tests
   async _signWithProvider (signedData: any): Promise<string> {
     return await getEip712Signature(
-      this.web3,
+      this.provider,
       signedData,
       this.config.methodSuffix,
       this.config.jsonStringifyRequest
     )
   }
 
-  _signWithControlledKey (privateKey: PrefixedHexString, signedData: TypedRequestData): string {
-    return signTypedData_v4(Buffer.from(removeHexPrefix(privateKey), 'hex'), { data: signedData })
+  _signWithControlledKey (privateKey: PrefixedHexString, signedData: TypedMessage<any>): string {
+    return signTypedData({
+      privateKey: Buffer.from(removeHexPrefix(privateKey), 'hex'),
+      data: signedData,
+      version: SignTypedDataVersion.V4
+    })
   }
 
   getAccounts (): string[] {

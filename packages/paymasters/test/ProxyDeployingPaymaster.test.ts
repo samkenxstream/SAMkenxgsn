@@ -1,17 +1,24 @@
-import 'source-map-support/register'
-import { RelayProvider, GSNConfig } from '@opengsn/provider'
-import { decodeRevertReason, getEip712Signature } from '@opengsn/common'
-import { Address } from '@opengsn/common/dist/types/Aliases'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
+
+import { RelayProvider, GSNConfig, defaultGsnConfig } from '@opengsn/provider'
+import {
+  Address,
+  RelayRequest,
+  cloneRelayRequest,
+  decodeRevertReason,
+  defaultEnvironment,
+  getEip712Signature
+} from '@opengsn/common'
+
 import {
   TypedRequestData,
   GsnDomainSeparatorType,
   GsnRequestType
 } from '@opengsn/common/dist/EIP712/TypedRequestData'
-import { RelayRequest, cloneRelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
+
 import { GsnTestEnvironment } from '@opengsn/cli/dist/GsnTestEnvironment'
 
-import { deployHub } from '@opengsn/dev/dist/test/TestUtils'
+import { deployHub, hardhatNodeChainId } from '@opengsn/dev/dist/test/TestUtils'
 
 import { constants, expectEvent } from '@openzeppelin/test-helpers'
 import { PrefixedHexString } from 'ethereumjs-util'
@@ -26,7 +33,7 @@ import {
   TestHubInstance,
   TestCounterInstance,
   ProxyFactoryInstance
-} from '@opengsn/paymasters/types/truffle-contracts'
+} from '../types/truffle-contracts'
 
 import {
   StakeManagerInstance,
@@ -78,6 +85,10 @@ export async function revert (id: string): Promise<void> {
 }
 
 contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) => {
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const provider = new StaticJsonRpcProvider(currentProviderHost)
+
   const tokensPerEther = 2
 
   let paymaster: ProxyDeployingPaymasterInstance
@@ -101,8 +112,6 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
   }
 
   const gasData = {
-    pctRelayFee: '0',
-    baseRelayFee: '0',
     maxFeePerGas: '1',
     maxPriorityFeePerGas: '1',
     gasLimit: 1e6.toString()
@@ -129,7 +138,7 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
     relayHub = await deployHub(stakeManager.address, constants.ZERO_ADDRESS, constants.ZERO_ADDRESS, constants.ZERO_ADDRESS, '0')
     await paymaster.setRelayHub(relayHub.address)
     await forwarder.registerRequestType(GsnRequestType.typeName, GsnRequestType.typeSuffix)
-    await forwarder.registerDomainSeparator(GsnDomainSeparatorType.name, GsnDomainSeparatorType.version)
+    await forwarder.registerDomainSeparator(defaultGsnConfig.domainSeparatorName, GsnDomainSeparatorType.version)
     await paymaster.setTrustedForwarder(forwarder.address)
 
     paymasterData = web3.eth.abi.encodeParameter('address', uniswap.address)
@@ -156,9 +165,10 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
     }
     proxyAddress = await paymaster.getPayer(relayRequest)
     signature = await getEip712Signature(
-      web3,
+      provider,
       new TypedRequestData(
-        defaultEnvironment.chainId,
+        defaultGsnConfig.domainSeparatorName,
+        hardhatNodeChainId,
         forwarder.address,
         relayRequest
       )
@@ -188,9 +198,10 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
         const relayRequestX = cloneRelayRequest(relayRequest)
         relayRequestX.request.value = 1e18.toString()
         const signatureX = await getEip712Signature(
-          web3,
+          provider,
           new TypedRequestData(
-            defaultEnvironment.chainId,
+            defaultGsnConfig.domainSeparatorName,
+            hardhatNodeChainId,
             forwarder.address,
             relayRequestX
           )
@@ -220,15 +231,16 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
         it('should reject if incorrect signature', async () => {
           await paymaster.setRelayHub(relayHub.address)
           const wrongSignature = await getEip712Signature(
-            web3,
+            provider,
             new TypedRequestData(
+              defaultGsnConfig.domainSeparatorName,
               222,
               forwarder.address,
               relayRequest
             )
           )
           const gas = 5000000
-          const relayCall: any = await relayHub.relayCall.call(10e6, relayRequest, wrongSignature, '0x', {
+          const relayCall: any = await relayHub.relayCall.call(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, wrongSignature, '0x', {
             from: relayWorker,
             gas
           })
@@ -249,7 +261,7 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
 
           it('should reject if payer is an already deployed identity and approval is insufficient', async function () {
             await paymaster.setRelayHub(testHub.address)
-            assert.equal(await revertReason(testHub.callPreRC(relayRequest, signature, '0x', 1e6)), transferErc20Error)
+            assert.match(await revertReason(testHub.callPreRC(relayRequest, signature, '0x', 1e6)), transferErc20Error)
           })
         })
       })
@@ -320,8 +332,9 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
       await paymaster.setRelayHub(testHub.address)
       const tx = await testHub.callPostRC(paymaster.address, context, gasUseWithoutPost, relayRequest.relayData)
       const gasUsedWithPost = gasUseWithoutPost + gasUsedByPost
+      const hubConfig = await testHub.getConfiguration()
       // Repeat on-chain calculation here for sanity
-      const actualEtherCharge = (100 + parseInt(relayRequest.relayData.pctRelayFee)) / 100 * gasUsedWithPost
+      const actualEtherCharge = (100 + parseInt(hubConfig.pctRelayFee.toString())) / 100 * gasUsedWithPost
       const actualTokenCharge = actualEtherCharge * tokensPerEther
       const refund = parseInt(preCharge) - actualTokenCharge
       await expectEvent.inTransaction(tx.tx, TestToken, 'Transfer', {
@@ -408,7 +421,7 @@ contract('ProxyDeployingPaymaster', ([senderAddress, relayWorker, burnAddress]) 
       }
       encodedCall = counter.contract.methods.increment().encodeABI()
       relayProvider = await RelayProvider.newProvider({
-        provider: web3.currentProvider as HttpProvider,
+        provider,
         overrideDependencies: {
           asyncPaymasterData: async () => {
             return paymasterData

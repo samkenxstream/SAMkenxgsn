@@ -1,5 +1,4 @@
-import { HttpProvider } from 'web3-core'
-
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { RelayProvider } from '@opengsn/provider/dist/RelayProvider'
 import {
   RelayHubInstance,
@@ -8,16 +7,15 @@ import {
   TestRecipientInstance,
   TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { deployHub, emptyBalance, serverWorkDir, startRelay, stopRelay } from './TestUtils'
+import { deployHub, emptyBalance, evmMineMany, serverWorkDir, startRelay, stopRelay } from './TestUtils'
 import { ChildProcessWithoutNullStreams } from 'child_process'
-import { GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { constants, ether } from '@opengsn/common'
+import { defaultGsnConfig, GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
+import { defaultEnvironment, constants, ether, Address } from '@opengsn/common'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
+
 import Web3 from 'web3'
 import fs from 'fs'
 import { KEYSTORE_FILENAME } from '@opengsn/relay/dist/KeyManager'
-import { Address } from '@opengsn/common/dist/types/Aliases'
 
 const TestRecipient = artifacts.require('TestRecipient')
 const TestPaymasterEverythingAccepted = artifacts.require('TestPaymasterEverythingAccepted')
@@ -38,6 +36,10 @@ contract('runServer', function (accounts) {
   let relayProvider: RelayProvider
   const stake = 1e18.toString()
 
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
+
   async function deployGsnContracts (): Promise<void> {
     testToken = await TestToken.new()
     sm = await StakeManager.new(defaultEnvironment.maxUnstakeDelay, 0, 0, constants.BURN_ADDRESS, constants.BURN_ADDRESS)
@@ -57,7 +59,7 @@ contract('runServer', function (accounts) {
     TestRecipient.web3 = new Web3(web3.currentProvider.host)
     sr = await TestRecipient.new(forwarder.address)
 
-    await registerForwarderForGsn(forwarder)
+    await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarder)
 
     paymaster = await TestPaymasterEverythingAccepted.new()
     await paymaster.setTrustedForwarder(forwarder.address)
@@ -66,6 +68,7 @@ contract('runServer', function (accounts) {
     await rhub.depositFor(paymaster.address, { value: (5e18).toString() })
 
     relayClientConfig = {
+      gasPriceFactorPercent: 300,
       loggerConfiguration: { logLevel: 'error' },
       paymasterAddress: paymaster.address,
       maxApprovalDataLength: 4,
@@ -74,7 +77,7 @@ contract('runServer', function (accounts) {
 
     relayProvider = await RelayProvider.newProvider(
       {
-        provider: web3.currentProvider as HttpProvider,
+        provider: ethersProvider,
         config: relayClientConfig
       }).init()
 
@@ -86,17 +89,17 @@ contract('runServer', function (accounts) {
     await emptyBalance(gasless, accounts[0])
   })
   it('should create different workers directories for different RelayHubs', async function () {
+    await evmMineMany(10)
     const hubsNumber = 2
     const differentHubs = new Set<Address>()
     for (let i = 0; i < hubsNumber; i++) {
       await deployGsnContracts()
       differentHubs.add(rhub.address)
       relayProcess = await startRelay(rhub.address, testToken, sm, {
+        maxMaxFeePerGas: 1e14.toString(),
         stake,
         stakeTokenAddress: testToken.address,
         delay: 3600 * 24 * 7,
-        pctRelayFee: 12,
-        url: 'asd',
         relayOwner: accounts[0],
         // @ts-ignore
         ethereumNodeUrl: web3.currentProvider.host,

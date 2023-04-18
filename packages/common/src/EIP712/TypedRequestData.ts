@@ -2,7 +2,7 @@ import { Address } from '../types/Aliases'
 import { RelayRequest } from './RelayRequest'
 
 import { bufferToHex, PrefixedHexString } from 'ethereumjs-util'
-import { TypedDataUtils, TypedMessage } from 'eth-sig-util'
+import { TypedDataUtils, TypedMessage, SignTypedDataVersion } from '@metamask/eth-sig-util'
 
 export interface MessageTypeProperty {
   name: string
@@ -38,8 +38,6 @@ export const EIP712DomainTypeWithoutVersion: MessageTypeProperty[] = [
 const RelayDataType = [
   { name: 'maxFeePerGas', type: 'uint256' },
   { name: 'maxPriorityFeePerGas', type: 'uint256' },
-  { name: 'pctRelayFee', type: 'uint256' },
-  { name: 'baseRelayFee', type: 'uint256' },
   { name: 'transactionCalldataGasUsed', type: 'uint256' },
   { name: 'relayWorker', type: 'address' },
   { name: 'paymaster', type: 'address' },
@@ -72,21 +70,26 @@ interface Types extends MessageTypes {
 // use these values in registerDomainSeparator
 export const GsnDomainSeparatorType = {
   prefix: 'string name,string version',
-  name: 'GSN Relayed Transaction',
   version: '3'
 }
 
-export function getDomainSeparator (verifier: Address, chainId: number): Record<string, unknown> {
+export function getDomainSeparator (name: string, verifier: Address, chainId: number): EIP712Domain {
   return {
-    name: GsnDomainSeparatorType.name,
+    name,
     version: GsnDomainSeparatorType.version,
     chainId: chainId,
     verifyingContract: verifier
   }
 }
 
-export function getDomainSeparatorHash (verifier: Address, chainId: number): PrefixedHexString {
-  return bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', getDomainSeparator(verifier, chainId), { EIP712Domain: EIP712DomainType }))
+export function getDomainSeparatorHash (name: string, verifier: Address, chainId: number): PrefixedHexString {
+  return bufferToHex(
+    TypedDataUtils.hashStruct(
+      'EIP712Domain',
+      getDomainSeparator(name, verifier, chainId) as Record<string, unknown>,
+      { EIP712Domain: EIP712DomainType },
+      SignTypedDataVersion.V4)
+  )
 }
 
 export class TypedRequestData implements TypedMessage<Types> {
@@ -96,6 +99,7 @@ export class TypedRequestData implements TypedMessage<Types> {
   readonly message: any
 
   constructor (
+    name: string,
     chainId: number,
     verifier: Address,
     relayRequest: RelayRequest) {
@@ -104,7 +108,7 @@ export class TypedRequestData implements TypedMessage<Types> {
       RelayRequest: RelayRequestType,
       RelayData: RelayDataType
     }
-    this.domain = getDomainSeparator(verifier, chainId)
+    this.domain = getDomainSeparator(name, verifier, chainId)
     this.primaryType = 'RelayRequest'
     // in the signature, all "request" fields are flattened out at the top structure.
     // other params are inside "relayData" sub-type
@@ -117,5 +121,5 @@ export class TypedRequestData implements TypedMessage<Types> {
 
 export const GsnRequestType = {
   typeName: 'RelayRequest',
-  typeSuffix: 'RelayData relayData)RelayData(uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint256 pctRelayFee,uint256 baseRelayFee,uint256 transactionCalldataGasUsed,address relayWorker,address paymaster,address forwarder,bytes paymasterData,uint256 clientId)'
+  typeSuffix: 'RelayData relayData)RelayData(uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint256 transactionCalldataGasUsed,address relayWorker,address paymaster,address forwarder,bytes paymasterData,uint256 clientId)'
 }

@@ -1,14 +1,13 @@
 /* eslint-disable no-void */
-import { GsnTransactionDetails } from '@opengsn/common/dist/types/GsnTransactionDetails'
 import { RelayClient, JsonRpcCallback, RelayProvider, GSNUnresolvedConstructorInput } from '@opengsn/provider'
 
-import { Address } from '@opengsn/common/dist/types/Aliases'
+import { Address, GsnTransactionDetails, TruffleContract } from '@opengsn/common'
 
 import { JsonRpcPayload } from 'web3-core-helpers'
 import Contract from 'web3-eth-contract'
 
-import ProxyIdentityArtifact from '@opengsn/paymasters/build/contracts/ProxyIdentity.json'
-import ProxyFactoryArtifact from '@opengsn/paymasters/build/contracts/ProxyFactory.json'
+import ProxyIdentityArtifact from '../build/contracts/ProxyIdentity.json'
+import ProxyFactoryArtifact from '../build/contracts/ProxyFactory.json'
 
 export default class ProxyRelayProvider extends RelayProvider {
   private readonly proxyFactoryAddress: Address
@@ -41,6 +40,7 @@ export default class ProxyRelayProvider extends RelayProvider {
       // @ts-ignore
       const proxy = new Contract(ProxyIdentityArtifact.abi, proxyAddress)
       const value = gsnTransactionDetails.value ?? '0'
+      // TODO: migrate to AbiCoder and remove dependency on Web3 Contract object
       // @ts-ignore
       payload.params[0].data = proxy.methods.execute(0, gsnTransactionDetails.to, value, gsnTransactionDetails.data).encodeABI()
       // @ts-ignore
@@ -53,10 +53,13 @@ export default class ProxyRelayProvider extends RelayProvider {
   }
 
   async calculateProxyAddress (owner: Address): Promise<Address> {
-    // @ts-ignore
-    const proxyFactory = new Contract(ProxyFactoryArtifact.abi, this.proxyFactoryAddress)
-    proxyFactory.setProvider(this.origProvider)
+    const proxyFactoryContract = TruffleContract({
+      contractName: 'ProxyFactory',
+      abi: ProxyFactoryArtifact.abi
+    })
+    proxyFactoryContract.setProvider(this.origProvider)
+    const proxyFactory = await proxyFactoryContract.at(this.proxyFactoryAddress)
     // eslint-disable-next-line @typescript-eslint/return-await
-    return await proxyFactory.methods.calculateAddress(owner).call()
+    return await proxyFactory.calculateAddress(owner)
   }
 }

@@ -1,6 +1,5 @@
-import { TransactionReceipt } from 'web3-core'
-
-import { ContractInteractor, ConstructorParams, RelayCallABI } from '@opengsn/common/dist/ContractInteractor'
+import { TransactionResponse } from '@ethersproject/providers'
+import { ContractInteractor, ConstructorParams, RelayCallABI } from '@opengsn/common'
 
 export class BadContractInteractor extends ContractInteractor {
   static readonly message = 'This is not the contract you are looking for'
@@ -13,11 +12,12 @@ export class BadContractInteractor extends ContractInteractor {
     this.failValidateARC = failValidateARC
   }
 
-  async validateRelayCall (relayCallABIData: RelayCallABI, viewCallGasLimit: BN, isDryRun: boolean): Promise<{ paymasterAccepted: boolean, returnValue: string, reverted: boolean }> {
+  async validateRelayCall (relayCallABIData: RelayCallABI, viewCallGasLimit: BN, isDryRun: boolean): Promise<{ paymasterAccepted: boolean, returnValue: string, relayHubReverted: boolean, recipientReverted: boolean }> {
     if (this.failValidateARC) {
       return {
         paymasterAccepted: false,
-        reverted: true,
+        relayHubReverted: true,
+        recipientReverted: false,
         returnValue: BadContractInteractor.message
       }
     }
@@ -25,7 +25,7 @@ export class BadContractInteractor extends ContractInteractor {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
-  async sendSignedTransaction (rawTx: string): Promise<TransactionReceipt> {
+  async sendSignedTransaction (rawTx: string): Promise<TransactionResponse> {
     throw new Error(BadContractInteractor.wrongNonceMessage)
   }
 }

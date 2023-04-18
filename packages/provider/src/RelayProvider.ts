@@ -1,31 +1,36 @@
 /* eslint-disable no-void */
 // @ts-ignore
 import abiDecoder from 'abi-decoder'
-import Web3 from 'web3'
-import { HttpProvider } from 'web3-core'
-import { JsonRpcPayload, JsonRpcResponse } from 'web3-core-helpers'
-import { PrefixedHexString } from 'ethereumjs-util'
-import { EventData } from 'web3-eth-contract'
 
-import { gsnRuntimeVersion } from '@opengsn/common'
-import { LoggerInterface } from '@opengsn/common/dist/LoggerInterface'
+import { BigNumber } from '@ethersproject/bignumber'
+import { PrefixedHexString } from 'ethereumjs-util'
+import { TypedMessage } from '@metamask/eth-sig-util'
+import { JsonRpcProvider, TransactionReceipt, ExternalProvider } from '@ethersproject/providers'
+
+import {
+  Address,
+  EventData,
+  GSNConfig,
+  GsnTransactionDetails,
+  JsonRpcPayload,
+  JsonRpcResponse,
+  LoggerInterface,
+  SignTypedDataCallback,
+  TransactionRejectedByPaymaster,
+  TransactionRelayed,
+  gsnRuntimeVersion,
+  isSameAddress
+} from '@opengsn/common'
+
 import relayHubAbi from '@opengsn/common/dist/interfaces/IRelayHub.json'
 
-import { GsnTransactionDetails } from '@opengsn/common/dist/types/GsnTransactionDetails'
 import { AccountKeypair } from './AccountManager'
 import { GsnEvent } from './GsnEvents'
 import { _dumpRelayingResult, GSNUnresolvedConstructorInput, RelayClient, RelayingResult } from './RelayClient'
-import { GSNConfig } from './GSNConfigurator'
-import { Web3ProviderBaseInterface } from '@opengsn/common/dist/types/Aliases'
-import { TransactionRejectedByPaymaster, TransactionRelayed } from '@opengsn/common/dist/types/GSNContractsDataTypes'
 
 abiDecoder.addABI(relayHubAbi)
 
 export type JsonRpcCallback = (error: Error | null, result?: JsonRpcResponse) => void
-
-interface ISendAsync {
-  sendAsync?: any
-}
 
 /**
  * This data can later be used to optimize creation of Transaction Receipts
@@ -40,16 +45,18 @@ const TX_NOTFOUND = 'tx-notfound'
 
 const BLOCKS_FOR_LOOKUP = 5000
 
-// TODO: stop faking the HttpProvider implementation -  it won't work for any other 'origProvider' type
-export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
-  protected readonly origProvider: HttpProvider & ISendAsync
-  private readonly origProviderSend: any
-  protected readonly web3: Web3
+export class RelayProvider implements ExternalProvider {
+  protected readonly origProvider: JsonRpcProvider
+  private readonly _origProviderSend: (method: string, params: any[]) => Promise<any>
+  private asyncSignTypedData?: SignTypedDataCallback
   protected readonly submittedRelayRequests = new Map<string, SubmittedRelayRequestInfo>()
   protected config!: GSNConfig
 
   readonly relayClient: RelayClient
   logger!: LoggerInterface
+
+  host!: string
+  connected!: boolean
 
   static newProvider (input: GSNUnresolvedConstructorInput): RelayProvider {
     return new RelayProvider(new RelayClient(input))
@@ -62,44 +69,30 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
       throw new Error('Using new RelayProvider() constructor directly is deprecated.\nPlease create provider using RelayProvider.newProvider({})')
     }
     this.relayClient = relayClient
-    this.web3 = new Web3(relayClient.getUnderlyingProvider() as HttpProvider)
-    // TODO: stop faking the HttpProvider implementation
-    this.origProvider = this.relayClient.getUnderlyingProvider() as HttpProvider
-    this.host = this.origProvider.host
-    this.connected = this.origProvider.connected
+    this.origProvider = this.relayClient.getUnderlyingProvider()
     this.logger = this.relayClient.logger
 
-    if (typeof this.origProvider.sendAsync === 'function') {
-      this.origProviderSend = this.origProvider.sendAsync.bind(this.origProvider)
-    } else {
-      this.origProviderSend = this.origProvider.send.bind(this.origProvider)
-    }
+    this._origProviderSend = this.origProvider.send.bind(this.origProvider)
     this._delegateEventsApi()
   }
 
-  sendId = 1000
-
-  // async wrapper for calling origSend
-  async origSend (method: string, params: any[]): Promise<any> {
-    return await new Promise((resolve, reject) => {
-      this.origProviderSend({
-        id: this.sendId++,
+  origProviderSend (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
+    this._origProviderSend(payload.method, payload.params ?? []).then((it: any) => {
+      const response: JsonRpcResponse = {
         jsonrpc: '2.0',
-        method,
-        params
-      }, (error: Error | null, result?: JsonRpcResponse) => {
-        if (error != null) {
-          reject(error)
-        } else {
-          resolve(result?.result)
-        }
-      })
+        id: payload.id ?? 0,
+        result: it
+      }
+      callback(null, response)
+    }).catch((err: any) => {
+      callback(err)
     })
   }
 
   async init (): Promise<this> {
     await this.relayClient.init()
     this.config = this.relayClient.config
+    this.asyncSignTypedData = this.relayClient.dependencies.asyncSignTypedData
     this.logger.info(`Created new RelayProvider ver.${gsnRuntimeVersion}`)
     return this
   }
@@ -124,7 +117,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     })
   }
 
-  send (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
+  send (payload: JsonRpcPayload | any, callback: JsonRpcCallback): void {
     if (this._useGSN(payload)) {
       if (payload.method === 'eth_sendTransaction') {
         // @ts-ignore
@@ -145,12 +138,23 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
       }
       if (payload.method === 'eth_accounts') {
         this._getAccounts(payload, callback)
+        return
+      }
+      if (payload.method === 'eth_sign') {
+        this._sign(payload, callback)
+        return
+      }
+      if (payload.method === 'eth_signTransaction') {
+        this._signTransaction(payload, callback)
+        return
+      }
+      if (payload.method === 'eth_signTypedData') {
+        this._signTypedData(payload, callback)
+        return
       }
     }
 
-    this.origProviderSend(payload, (error: Error | null, result?: JsonRpcResponse) => {
-      callback(error, result)
-    })
+    this.origProviderSend(payload, callback)
   }
 
   _ethGetTransactionReceiptWithTransactionHash (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
@@ -203,7 +207,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     if (submissionDetails != null) {
       return submissionDetails
     }
-    const blockNumber = await this.web3.eth.getBlockNumber()
+    const blockNumber = await this.origProvider.getBlockNumber()
     const manyBlocksAgo = Math.max(1, blockNumber - BLOCKS_FOR_LOOKUP)
     this.logger.warn(`Looking up relayed transaction by its RelayRequestID(${relayRequestID}) from block ${manyBlocksAgo}`)
     return {
@@ -220,11 +224,11 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     if (!txHash.startsWith('0x')) {
       txHash = relayRequestID
     }
-    const tx = await this.origSend('eth_getTransactionByHash', [txHash])
+    const tx = await this._origProviderSend('eth_getTransactionByHash', [txHash])
     if (tx != null) {
       // must return exactly what was requested...
       tx.hash = relayRequestID
-      tx.actualTransactionHash = tx.hash
+      tx.actualTransactionHash = txHash
     }
     this.asCallback(Promise.resolve(tx), payload, callback)
   }
@@ -259,7 +263,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     this.logger.info('calling sendAsync' + JSON.stringify(payload))
     let gsnTransactionDetails: GsnTransactionDetails
     try {
-      gsnTransactionDetails = this._fixGasFees(payload.params?.[0])
+      gsnTransactionDetails = await this._fixGasFees(payload.params?.[0])
     } catch (e: any) {
       this.logger.error(e)
       callback(e)
@@ -273,7 +277,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     }
   }
 
-  async _onRelayTransactionFulfilled (relayingResult: RelayingResult, payload: JsonRpcPayload, callback: JsonRpcCallback): Promise<void> {
+  _onRelayTransactionFulfilled (relayingResult: RelayingResult, payload: JsonRpcPayload, callback: JsonRpcCallback): void {
     if (relayingResult.relayRequestID != null) {
       const jsonRpcSendResult = this._convertRelayRequestIdToRpcSendResponse(relayingResult.relayRequestID, payload)
       this.cacheSubmittedTransactionDetails(relayingResult)
@@ -285,7 +289,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     }
   }
 
-  async _onRelayTransactionRejected (reason: any, callback: JsonRpcCallback): Promise<void> {
+  _onRelayTransactionRejected (reason: any, callback: JsonRpcCallback): void {
     const reasonStr = reason instanceof Error ? reason.message : JSON.stringify(reason)
     const msg = `Rejected relayTransaction call with reason: ${reasonStr}`
     this.logger.info(msg)
@@ -315,7 +319,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     relayRequestID: string,
     submissionDetails: SubmittedRelayRequestInfo
   ): Promise<string> {
-    const extraTopics = [undefined, undefined, [relayRequestID]]
+    const extraTopics = [null, null, [relayRequestID]]
     const events = await this.relayClient.dependencies.contractInteractor.getPastEventsForHub(
       extraTopics,
       { fromBlock: submissionDetails.submissionBlock },
@@ -344,7 +348,10 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     if (transactionHash === TX_NOTFOUND) {
       return this._createTransactionRevertedReceipt()
     }
-    const originalTransactionReceipt = await this.web3.eth.getTransactionReceipt(transactionHash)
+    const originalTransactionReceipt = await this.origProvider.getTransactionReceipt(transactionHash)
+    if (originalTransactionReceipt == null) {
+      return null
+    }
     return this._getTranslatedGsnResponseResult(originalTransactionReceipt, relayRequestID)
   }
 
@@ -401,7 +408,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     return gsnTransactionDetails?.useGSN ?? true
   }
 
-  _fixGasFees (_txDetails: any): GsnTransactionDetails {
+  async _fixGasFees (_txDetails: any): Promise<GsnTransactionDetails> {
     const txDetails = { ..._txDetails }
     if (txDetails.maxFeePerGas != null && txDetails.maxPriorityFeePerGas != null) {
       delete txDetails.gasPrice
@@ -413,20 +420,26 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
       delete txDetails.gasPrice
       return txDetails
     }
-    throw new Error('Relay Provider: must provide either gasPrice or (maxFeePerGas and maxPriorityFeePerGas)')
+    if (txDetails.gasPrice == null && txDetails.maxFeePerGas == null && txDetails.maxPriorityFeePerGas == null) {
+      const gasFees = await this.calculateGasFees()
+      txDetails.maxPriorityFeePerGas = gasFees.maxPriorityFeePerGas
+      txDetails.maxFeePerGas = gasFees.maxFeePerGas
+      return txDetails
+    }
+    throw new Error('Relay Provider: cannot provide only one of maxFeePerGas and maxPriorityFeePerGas')
   }
 
   /* wrapping HttpProvider interface */
 
-  host: string
-  connected: boolean
+  // host: string
+  // connected: boolean
 
   supportsSubscriptions (): boolean {
-    return this.origProvider.supportsSubscriptions()
+    return false
   }
 
   disconnect (): boolean {
-    return this.origProvider.disconnect()
+    return false
   }
 
   newAccount (): AccountKeypair {
@@ -437,8 +450,81 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
     return await this.relayClient.calculateGasFees()
   }
 
-  addAccount (privateKey: PrefixedHexString): void {
-    this.relayClient.addAccount(privateKey)
+  addAccount (privateKey: PrefixedHexString): AccountKeypair {
+    return this.relayClient.addAccount(privateKey)
+  }
+
+  isEphemeralAccount (account: Address): boolean {
+    const ephemeralAccounts = this.relayClient.dependencies.accountManager.getAccounts()
+    return ephemeralAccounts.find(it => isSameAddress(account, it)) != null
+  }
+
+  _sign (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
+    const id = (typeof payload.id === 'string' ? parseInt(payload.id) : payload.id) ?? -1
+    const from = payload.params?.[0]
+    if (from != null && this.isEphemeralAccount(from)) {
+      const result = this.relayClient.dependencies.accountManager.signMessage(payload.params?.[1], from)
+      const rpcResponse = {
+        id,
+        result,
+        jsonrpc: '2.0'
+      }
+      callback(null, rpcResponse)
+      return
+    }
+    this.origProviderSend(payload, callback)
+  }
+
+  _signTransaction (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
+    const id = (typeof payload.id === 'string' ? parseInt(payload.id) : payload.id) ?? -1
+    const transactionConfig: TransactionConfig = payload.params?.[0]
+    const from = transactionConfig?.from as string
+    if (from != null && this.isEphemeralAccount(from)) {
+      const result = this.relayClient.dependencies.accountManager.signTransaction(transactionConfig, from)
+      const rpcResponse = {
+        id,
+        result,
+        jsonrpc: '2.0'
+      }
+      callback(null, rpcResponse)
+      return
+    }
+    this.origProviderSend(payload, callback)
+  }
+
+  _signTypedData (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
+    const id = (typeof payload.id === 'string' ? parseInt(payload.id) : payload.id) ?? -1
+    const from = payload.params?.[0] as string
+    const typedData: TypedMessage<any> = payload.params?.[1]
+    if (from != null && this.isEphemeralAccount(from)) {
+      this.logger.debug(`Using ephemeral key for address ${from} to sign a Relay Request or a Typed Message`)
+      const result = this.relayClient.dependencies.accountManager.signTypedData(typedData, from)
+      const rpcResponse = {
+        id,
+        result,
+        jsonrpc: '2.0'
+      }
+      callback(null, rpcResponse)
+      return
+    }
+    if (this.asyncSignTypedData != null) {
+      this.logger.debug('Using override for asyncSignTypedData to sign a Relay Request or a Typed Message')
+      this.asyncSignTypedData(typedData, from)
+        .then(function (result) {
+          const rpcResponse = {
+            id,
+            result,
+            jsonrpc: '2.0'
+          }
+          callback(null, rpcResponse)
+        })
+        .catch(function (error) {
+          callback(error)
+        })
+      return
+    }
+    this.logger.debug('Using an RPC call to sign a Relay Request or a Typed Message')
+    this.origProviderSend(payload, callback)
   }
 
   _getAccounts (payload: JsonRpcPayload, callback: JsonRpcCallback): void {
@@ -458,7 +544,7 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
    * If there is more than one successful {@link TransactionRelayed} throws as this is impossible for current Forwarder
    */
   _pickSingleEvent (events: EventData[], relayRequestID: string): EventData {
-    const successes = events.filter(it => it.event === TransactionRelayed)
+    const successes = events.filter(it => it.name === TransactionRelayed)
     if (successes.length === 0) {
       const sorted = events.sort((a: EventData, b: EventData) => b.blockNumber - a.blockNumber)
       return sorted[0]
@@ -488,6 +574,10 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
 
   _createTransactionRevertedReceipt (): TransactionReceipt {
     return {
+      // TODO: I am not sure about these two, these were not required in Web3.js
+      confirmations: 0,
+      byzantium: false,
+      type: 0,
       to: '',
       from: '',
       contractAddress: '',
@@ -495,12 +585,12 @@ export class RelayProvider implements HttpProvider, Web3ProviderBaseInterface {
       blockHash: '',
       transactionHash: '',
       transactionIndex: 0,
-      gasUsed: 0,
+      gasUsed: BigNumber.from(0),
       logs: [],
       blockNumber: 0,
-      cumulativeGasUsed: 0,
-      effectiveGasPrice: 0,
-      status: false // failure
+      cumulativeGasUsed: BigNumber.from(0),
+      effectiveGasPrice: BigNumber.from(0),
+      status: 0 // failure
     }
   }
 }

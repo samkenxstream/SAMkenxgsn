@@ -1,24 +1,28 @@
-import { LoggerInterface } from '@opengsn/common/dist/LoggerInterface'
+import {
+  ApprovalDataCallback,
+  ContractInteractor,
+  GSNConfig,
+  HttpClient,
+  LoggerConfiguration,
+  LoggerInterface,
+  PaymasterDataCallback,
+  PingFilter,
+  RelayFilter,
+  SignTypedDataCallback,
+  defaultEnvironment,
+  gsnRequiredVersion,
+  gsnRuntimeVersion
+} from '@opengsn/common'
 
 import { AccountManager } from './AccountManager'
-import { ContractInteractor } from '@opengsn/common/dist/ContractInteractor'
-import { HttpClient } from '@opengsn/common/dist/HttpClient'
+
 import { KnownRelaysManager } from './KnownRelaysManager'
 import { RelayedTransactionValidator } from './RelayedTransactionValidator'
-import {
-  AsyncDataCallback,
-  AsyncScoreCalculator,
-  NpmLogLevel,
-  PingFilter,
-  RelayFilter
-} from '@opengsn/common/dist/types/Aliases'
-import { gsnRequiredVersion } from '@opengsn/common/dist/Version'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { GSNConfig } from '@opengsn/common/dist/ConfigResponse'
-import { gsnRuntimeVersion } from '@opengsn/common/dist'
-export type { GSNConfig } from '@opengsn/common/dist/ConfigResponse'
+
+export type { GSNConfig } from '@opengsn/common'
 
 const GAS_PRICE_PERCENT = 20
+const GAS_PRICE_SLACK_PERCENT = 80
 const MAX_RELAY_NONCE_GAP = 3
 const DEFAULT_RELAY_TIMEOUT_GRACE_SEC = 1800
 
@@ -27,15 +31,19 @@ export const defaultLoggerConfiguration: LoggerConfiguration = {
 }
 
 export const defaultGsnConfig: GSNConfig = {
+  calldataEstimationSlackFactor: 1,
   preferredRelays: [],
   blacklistedRelays: [],
   pastEventsQueryMaxPageSize: Number.MAX_SAFE_INTEGER,
+  pastEventsQueryMaxPageCount: 20,
   gasPriceFactorPercent: GAS_PRICE_PERCENT,
+  gasPriceSlackPercent: GAS_PRICE_SLACK_PERCENT,
+  getGasFeesBlocks: 5,
+  getGasFeesPercentile: 50,
   gasPriceOracleUrl: '',
   gasPriceOraclePath: '',
   minMaxPriorityFeePerGas: 1e9,
   maxRelayNonceGap: MAX_RELAY_NONCE_GAP,
-  sliceSize: 3,
   relayTimeoutGrace: DEFAULT_RELAY_TIMEOUT_GRACE_SEC,
   methodSuffix: '_v4',
   requiredVersionRange: gsnRequiredVersion,
@@ -45,31 +53,31 @@ export const defaultGsnConfig: GSNConfig = {
   clientId: '1',
   requestValidSeconds: 172800, // 2 days
   maxViewableGasLimit: '12000000',
+  minViewableGasLimit: '300000',
   environment: defaultEnvironment,
   maxApprovalDataLength: 0,
   maxPaymasterDataLength: 0,
   clientDefaultConfigUrl: `https://client-config.opengsn.org/${gsnRuntimeVersion}/client-config.json`,
   useClientDefaultConfigUrl: true,
-  performDryRunViewRelayCall: true
-}
-
-export interface LoggerConfiguration {
-  logLevel: NpmLogLevel
-  loggerUrl?: string
-  userId?: string
-  applicationId?: string
+  performDryRunViewRelayCall: true,
+  performEstimateGasFromRealSender: false,
+  paymasterAddress: '',
+  tokenPaymasterDomainSeparators: {},
+  waitForSuccessSliceSize: 3,
+  waitForSuccessPingGrace: 3000,
+  domainSeparatorName: 'GSN Relayed Transaction'
 }
 
 export interface GSNDependencies {
   httpClient: HttpClient
-  logger: LoggerInterface
+  logger?: LoggerInterface
   contractInteractor: ContractInteractor
   knownRelaysManager: KnownRelaysManager
   accountManager: AccountManager
   transactionValidator: RelayedTransactionValidator
   pingFilter: PingFilter
   relayFilter: RelayFilter
-  asyncApprovalData: AsyncDataCallback
-  asyncPaymasterData: AsyncDataCallback
-  scoreCalculator: AsyncScoreCalculator
+  asyncApprovalData: ApprovalDataCallback
+  asyncPaymasterData: PaymasterDataCallback
+  asyncSignTypedData?: SignTypedDataCallback
 }

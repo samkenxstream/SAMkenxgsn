@@ -1,20 +1,20 @@
+import { StaticJsonRpcProvider, JsonRpcProvider } from '@ethersproject/providers'
 import { RelayServer } from '@opengsn/relay/dist/RelayServer'
 import { evmMine, evmMineMany } from './TestUtils'
-import { ContractInteractor } from '@opengsn/common/dist/ContractInteractor'
+import { ContractInteractor, LoggerInterface, GSNContractsDeployment, defaultEnvironment } from '@opengsn/common'
 import { HttpProvider } from 'web3-core'
 import { ProfilingProvider } from '@opengsn/common/dist/dev/ProfilingProvider'
 import { ServerTestEnvironment } from './ServerTestEnvironment'
-import { createServerLogger } from '@opengsn/relay/dist/ServerWinstonLogger'
-import { LoggerInterface } from '@opengsn/common/dist/LoggerInterface'
-import { GSNContractsDeployment } from '@opengsn/common/dist/GSNContractsDeployment'
-import { defaultEnvironment } from '@opengsn/common'
+import { createServerLogger } from '@opengsn/logger/dist/ServerWinstonLogger'
 
 contract('RelayServerRequestsProfiling', function (accounts) {
   const refreshStateTimeoutBlocks = 2
-  const callsPerStateRefresh = 14
+  const callsPerStateRefresh = 13
   const callsPerBlock = 0
-  const callsPerTransaction = 13
+  // one of the calls is 'get manager balance' which is not really necessary
+  const callsPerTransaction = 11
 
+  let ethersProvider: JsonRpcProvider
   let provider: ProfilingProvider
   let relayServer: RelayServer
   let env: ServerTestEnvironment
@@ -22,7 +22,10 @@ contract('RelayServerRequestsProfiling', function (accounts) {
 
   before(async function () {
     logger = createServerLogger('error', '', '')
-    provider = new ProfilingProvider(web3.currentProvider as HttpProvider)
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
+    provider = new ProfilingProvider(currentProviderHost)
     const contractFactory = async function (deployment: GSNContractsDeployment): Promise<ContractInteractor> {
       const maxPageSize = Number.MAX_SAFE_INTEGER
       const contractInteractor = new ContractInteractor({
@@ -35,8 +38,8 @@ contract('RelayServerRequestsProfiling', function (accounts) {
     await env.init({}, {}, contractFactory)
     await env.newServerInstance({ refreshStateTimeoutBlocks })
     relayServer = env.relayServer
-    const latestBlock = await web3.eth.getBlock('latest')
-    await relayServer._worker(latestBlock.number)
+    const latestBlock = await ethersProvider.getBlock('latest')
+    await relayServer._worker(latestBlock)
   })
 
   beforeEach(async function () {
@@ -45,9 +48,9 @@ contract('RelayServerRequestsProfiling', function (accounts) {
 
   it('should make X requests per block callback when state must be refreshed', async function () {
     await evmMineMany(5)
-    const latestBlock = await web3.eth.getBlock('latest')
-    assert.isTrue(relayServer._shouldRefreshState(latestBlock.number))
-    const receipts = await relayServer._worker(latestBlock.number)
+    const latestBlock = await ethersProvider.getBlock('latest')
+    assert.isTrue(relayServer._shouldRefreshState(latestBlock))
+    const receipts = await relayServer._worker(latestBlock)
     assert.equal(receipts.length, 0)
     provider.log()
     assert.equal(provider.requestsCount, callsPerStateRefresh)
@@ -55,9 +58,9 @@ contract('RelayServerRequestsProfiling', function (accounts) {
 
   it('should make X requests per block callback when nothing needs to be done', async function () {
     await evmMine()
-    const latestBlock = await web3.eth.getBlock('latest')
-    assert.isFalse(relayServer._shouldRefreshState(latestBlock.number))
-    const receipts = await relayServer._worker(latestBlock.number)
+    const latestBlock = await ethersProvider.getBlock('latest')
+    assert.isFalse(relayServer._shouldRefreshState(latestBlock))
+    const receipts = await relayServer._worker(latestBlock)
     assert.equal(receipts.length, 0)
     provider.log()
     assert.equal(provider.requestsCount, callsPerBlock)

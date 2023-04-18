@@ -22,12 +22,16 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  * - etc.
  */
 contract VerifyingPaymaster is Ownable, BasePaymaster {
+    address private constant DRY_RUN_ADDRESS = 0x0000000000000000000000000000000000000000;
 
     address public signer;
 
-    function _verifyApprovalData(bytes calldata approvalData) internal virtual override view{
-        // solhint-disable-next-line reason-string
-        require(approvalData.length == 65, "approvalData: invalid length for signature");
+    function _verifyApprovalData(bytes calldata approvalData) internal virtual override view {
+        // solhint-disable-next-line avoid-tx-origin
+        if (tx.origin != DRY_RUN_ADDRESS) {
+            // solhint-disable-next-line reason-string
+            require(approvalData.length == 65, "approvalData: invalid length for signature");
+        }
     }
 
     function _preRelayedCall(
@@ -43,8 +47,10 @@ contract VerifyingPaymaster is Ownable, BasePaymaster {
         (signature, maxPossibleGas);
 
         bytes32 requestHash = getRequestHash(relayRequest);
-        require(signer == ECDSA.recover(requestHash, approvalData), "approvalData: wrong signature");
-
+        // solhint-disable-next-line avoid-tx-origin
+        if (tx.origin != DRY_RUN_ADDRESS) {
+            require(signer == ECDSA.recover(requestHash, approvalData), "approvalData: wrong signature");
+        }
         return ("", false);
     }
 
@@ -62,7 +68,7 @@ contract VerifyingPaymaster is Ownable, BasePaymaster {
     }
 
     function packRelayData(GsnTypes.RelayData calldata d) public pure returns (bytes memory) {
-        return abi.encode(d.maxFeePerGas, d.maxPriorityFeePerGas, d.pctRelayFee, d.baseRelayFee, d.relayWorker, d.paymaster, d.paymasterData, d.clientId);
+        return abi.encode(d.maxFeePerGas, d.maxPriorityFeePerGas, d.relayWorker, d.paymaster, d.paymasterData, d.clientId);
     }
 
     function _postRelayedCall(
@@ -78,7 +84,7 @@ contract VerifyingPaymaster is Ownable, BasePaymaster {
     }
 
     function versionPaymaster() external view override virtual returns (string memory){
-        return "3.0.0-alpha.5+opengsn.vpm.ipaymaster";
+        return "3.0.0-beta.3+opengsn.vpm.ipaymaster";
     }
 
     function setSigner(address _signer) public onlyOwner {

@@ -1,22 +1,20 @@
 import sinon from 'sinon'
 import { ChildProcessWithoutNullStreams } from 'child_process'
 import { HttpProvider } from 'web3-core'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { Transaction } from '@ethereumjs/tx'
 import { ether } from '@openzeppelin/test-helpers'
 import { toBN } from 'web3-utils'
 
-import { GsnTransactionDetails } from '@opengsn/common/dist/types/GsnTransactionDetails'
-import { HttpClient } from '@opengsn/common/dist/HttpClient'
-import { HttpWrapper } from '@opengsn/common/dist/HttpWrapper'
-import { Address } from '@opengsn/common/dist/types/Aliases'
-import { LocalhostOne, ServerTestEnvironment } from '../ServerTestEnvironment'
+import { GsnTransactionDetails, HttpClient, HttpWrapper, Address, gsnRuntimeVersion, sleep, constants } from '@opengsn/common'
+
+import { ServerTestEnvironment } from '../ServerTestEnvironment'
 import { RelayClient } from '@opengsn/provider/dist/RelayClient'
 import { GSNConfig, GSNDependencies } from '@opengsn/provider/dist/GSNConfigurator'
-import { constants } from '@opengsn/common/dist/Constants'
-import { createClientLogger } from '@opengsn/provider/dist/ClientWinstonLogger'
-import { gsnRuntimeVersion } from '@opengsn/common/dist/Version'
+
+import { createClientLogger } from '@opengsn/logger/dist/ClientWinstonLogger'
+
 import { evmMineMany, startRelay, stopRelay } from '../TestUtils'
-import { sleep } from '@opengsn/common/dist/Utils'
 
 contract('PenalizationFlow', function (accounts) {
   const preferredRelays = ['http://www.my-preffered-relay.com']
@@ -28,6 +26,9 @@ contract('PenalizationFlow', function (accounts) {
   let relayClient: RelayClient
 
   before(async function () {
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
     const currentProvider = web3.currentProvider as HttpProvider
     env = new ServerTestEnvironment(currentProvider, accounts)
     await env.init()
@@ -45,8 +46,8 @@ contract('PenalizationFlow', function (accounts) {
       // TODO: adding 'intervalHandler' to the PenalizationService made tests crash/hang with 10ms interval...
       checkInterval: 100,
       delay: 3600 * 24 * 7,
-      pctRelayFee: 12,
-      url: LocalhostOne,
+      // using IP instead of localhost to avoid being excluded from list
+      url: 'http://127.0.0.1:8090/',
       relayOwner: accounts[0],
       ethereumNodeUrl: currentProvider.host,
       refreshStateTimeoutBlocks: 1,
@@ -72,6 +73,8 @@ contract('PenalizationFlow', function (accounts) {
         relayManagerAddress,
         relayHubAddress: env.relayHub.address,
         minMaxPriorityFeePerGas: '0',
+        minMaxFeePerGas: '0',
+        maxMaxFeePerGas: Number.MAX_SAFE_INTEGER.toString(),
         maxAcceptanceBudget: '999999999',
         ready: true,
         version: gsnRuntimeVersion
@@ -90,13 +93,13 @@ contract('PenalizationFlow', function (accounts) {
 
     sinon
       .stub(httpClient, 'relayTransaction')
-      .returns(Promise.resolve(signedTxToPenalize.rawTx))
+      .returns(Promise.resolve({ signedTx: signedTxToPenalize.rawTx, nonceGapFilled: {} }))
 
     const overrideDependencies: Partial<GSNDependencies> = {
       httpClient
     }
 
-    relayClient = new RelayClient({ provider: currentProvider, config, overrideDependencies })
+    relayClient = new RelayClient({ provider: ethersProvider, config, overrideDependencies })
     await relayClient.init()
     const { maxFeePerGas, maxPriorityFeePerGas } = await relayClient.calculateGasFees()
     gsnTransactionDetails = {
@@ -127,6 +130,8 @@ contract('PenalizationFlow', function (accounts) {
       assert.equal(auditResult?.commitTxHash?.length, 66)
 
       // let the relay run its 'intervalHandler'
+      await evmMineMany(5)
+      await sleep(1000)
       await evmMineMany(5)
       await sleep(1000)
 

@@ -11,24 +11,34 @@ import {
   RelayHubInstance,
   TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { HttpWrapper } from '@opengsn/common/dist/HttpWrapper'
-import { HttpClient } from '@opengsn/common/dist/HttpClient'
-import { defaultGsnConfig, GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { PrefixedHexString } from 'ethereumjs-util'
-import { isSameAddress, sleep } from '@opengsn/common/dist/Utils'
-import { RelayHubConfiguration } from '@opengsn/common/dist/types/RelayHubConfiguration'
-import { createServerLogger } from '@opengsn/relay/dist/ServerWinstonLogger'
-import { constants, Environment, toNumber } from '@opengsn/common'
-import { Address, IntString } from '@opengsn/common/dist/types/Aliases'
-import { toBN } from 'web3-utils'
+import {
+  Address,
+  Environment,
+  HttpClient,
+  HttpWrapper,
+  IntString,
+  RelayHubConfiguration,
+  constants,
+  defaultEnvironment,
+  isSameAddress,
+  sleep,
+  toNumber
+} from '@opengsn/common'
 
-require('source-map-support').install({ errorFormatterForce: true })
+import { defaultGsnConfig, GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
+
+import { PrefixedHexString } from 'ethereumjs-util'
+
+import { createServerLogger } from '@opengsn/logger/dist/ServerWinstonLogger'
+
+import { toBN } from 'web3-utils'
 
 const RelayHub = artifacts.require('RelayHub')
 const RelayRegistrar = artifacts.require('RelayRegistrar')
 
 const localhostOne = 'http://localhost:8090'
+
+export const hardhatNodeChainId = 1337
 
 export const serverWorkDir = '/tmp/gsn/test/server'
 
@@ -61,14 +71,20 @@ export async function startRelay (
   args.push('--logLevel', 'debug')
   args.push('--relayHubAddress', relayHubAddress)
   args.push('--managerStakeTokenAddress', testToken.address)
-  const configFile = path.resolve(__dirname, './server-config.json')
+  let configFile = path.resolve(__dirname, './server-config.json')
+  if (!fs.existsSync(configFile)) {
+    configFile = path.resolve(__dirname, '../../../dev/test/server-config.json')
+  }
   args.push('--config', configFile)
   args.push('--ownerAddress', options.relayOwner)
   if (options.loggingProvider) {
     args.push('--loggingProvider', options.loggingProvider)
   }
-  if (options.confirmationsNeeded) {
-    args.push('--confirmationsNeeded', options.confirmationsNeeded)
+  if (options.dbPruneTxAfterBlocks) {
+    args.push('--dbPruneTxAfterBlocks', options.dbPruneTxAfterBlocks)
+  }
+  if (options.dbPruneTxAfterSeconds) {
+    args.push('--dbPruneTxAfterSeconds', options.dbPruneTxAfterSeconds)
   }
 
   if (options.ethereumNodeUrl) {
@@ -76,12 +92,6 @@ export async function startRelay (
   }
   if (options.gasPriceFactor) {
     args.push('--gasPriceFactor', options.gasPriceFactor)
-  }
-  if (options.pctRelayFee) {
-    args.push('--pctRelayFee', options.pctRelayFee)
-  }
-  if (options.baseRelayFee) {
-    args.push('--baseRelayFee', options.baseRelayFee)
   }
   if (options.checkInterval) {
     args.push('--checkInterval', options.checkInterval)
@@ -98,7 +108,16 @@ export async function startRelay (
   if (options.refreshStateTimeoutBlocks) {
     args.push('--refreshStateTimeoutBlocks', options.refreshStateTimeoutBlocks)
   }
-  const runServerPath = path.resolve(__dirname, '../../relay/dist/runServer.js')
+  if (options.maxMaxFeePerGas) {
+    args.push('--maxMaxFeePerGas', options.maxMaxFeePerGas)
+  }
+  if (options.url) {
+    args.push('--url', options.url)
+  }
+  let runServerPath = path.resolve(__dirname, '../../relay/dist/runServer.js')
+  if (!fs.existsSync(runServerPath)) {
+    runServerPath = path.resolve(__dirname, '../../../relay/dist/runServer.js')
+  }
   const proc: ChildProcessWithoutNullStreams = childProcess.spawn('./node_modules/.bin/ts-node',
     [runServerPath, ...args])
 
@@ -328,6 +347,9 @@ export async function deployHub (
 
   await hub.setMinimumStakes([testToken], [testTokenMinimumStake])
 
+  // TODO: it will be tedious to change return type of this method
+  // @ts-ignore
+  hub._secretRegistrarInstance = relayRegistrar
   return hub
 }
 

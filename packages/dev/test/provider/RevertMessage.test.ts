@@ -8,16 +8,20 @@
 
 import { expectRevert } from '@openzeppelin/test-helpers'
 import { HttpProvider } from 'web3-core'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import Web3 from 'web3'
 
 import { RelayProvider } from '@opengsn/provider/dist/RelayProvider'
 import {
   TestRecipientInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { Address } from '@opengsn/common/dist/types/Aliases'
+import { Address } from '@opengsn/common'
 import { GsnTestEnvironment } from '@opengsn/cli/dist/GsnTestEnvironment'
 import { GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
 
+// @ts-ignore
+const currentProviderHost = web3.currentProvider.host
+const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
 const underlyingProvider = web3.currentProvider as HttpProvider
 
 describe.skip('RevertMessage.test', function () {
@@ -77,7 +81,7 @@ describe.skip('RevertMessage.test', function () {
         paymasterAddress
       }
 
-      relayProvider = await RelayProvider.newProvider({ provider: underlyingProvider, config: gsnConfig }).init()
+      relayProvider = await RelayProvider.newProvider({ provider: ethersProvider, config: gsnConfig }).init()
       // @ts-ignore
       TestRecipient.web3.setProvider(relayProvider)
 

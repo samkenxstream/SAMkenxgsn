@@ -6,11 +6,10 @@ node_modules
 !/.idea/dictionaries/
 /secret_mnemonic
 /.0x-artifacts/
-/coverage/
-/coverage.json
 /webtools/openeth-webtools.pack.js
 /.eslintcache
 /packages/common/src/interfaces/
+/packages/paymasters/src/interfaces/
 /ganache.pid
 /dist/
 cache

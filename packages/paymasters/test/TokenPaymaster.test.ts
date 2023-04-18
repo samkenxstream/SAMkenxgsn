@@ -1,3 +1,4 @@
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import {
   TypedRequestData,
   GsnDomainSeparatorType,
@@ -10,7 +11,7 @@ import {
   TestTokenInstance,
   TestUniswapInstance,
   TokenPaymasterInstance
-} from '@opengsn/paymasters/types/truffle-contracts'
+} from '../types/truffle-contracts'
 import {
   ForwarderInstance,
   PenalizerInstance,
@@ -18,15 +19,22 @@ import {
   StakeManagerInstance
 } from '@opengsn/contracts/types/truffle-contracts'
 import { GsnTestEnvironment } from '@opengsn/cli/dist/GsnTestEnvironment'
-import { RelayRequest, cloneRelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
+import {
+  RelayRequest,
+  cloneRelayRequest,
+  defaultEnvironment,
+  decodeRevertReason,
+  getEip712Signature,
+  constants
+} from '@opengsn/common'
 import { calculatePostGas, deployTestHub, mergeRelayRequest, registerAsRelayServer, revertReason } from './TestUtils'
-import { defaultEnvironment, decodeRevertReason, getEip712Signature, constants } from '@opengsn/common'
 
 import Web3 from 'web3'
 import { toWei } from 'web3-utils'
 import { PrefixedHexString, MAX_INTEGER } from 'ethereumjs-util'
 
-import { deployHub } from '@opengsn/dev/dist/test/TestUtils'
+import { deployHub, hardhatNodeChainId } from '@opengsn/dev/dist/test/TestUtils'
+import { defaultGsnConfig } from '@opengsn/provider'
 
 const TokenPaymaster = artifacts.require('TokenPaymaster')
 const TestUniswap = artifacts.require('TestUniswap')
@@ -36,10 +44,14 @@ const StakeManager = artifacts.require('StakeManager')
 const Penalizer = artifacts.require('Penalizer')
 const TestProxy = artifacts.require('TestProxy')
 
-export const transferErc20Error = '\'ERC20: insufficient allowance\' -- Reason given: ERC20: insufficient allowance.'
+export const transferErc20Error = /ERC20: insufficient allowance/
 
 // TODO: this test recreates GSN manually. Use GSN tools to do it instead.
 contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) => {
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const provider = new StaticJsonRpcProvider(currentProviderHost)
+
   let paymaster: TokenPaymasterInstance
   let uniswap: TestUniswapInstance
   let token: TestTokenInstance
@@ -68,7 +80,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       [from, 500, token.address, uniswap.address]
     )
     await token.mint(toWei('1', 'ether'))
-    const gasUsedByPost = await calculatePostGas(token, paymaster, from, context)
+    const gasUsedByPost = await calculatePostGas(token, paymaster, '0x', from, context)
     await paymaster.setPostGasUsage(gasUsedByPost)
     await paymaster.setRelayHub(hub.address)
 
@@ -77,7 +89,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
     recipient = await TestProxy.new(forwarder.address, { gas: 1e7 })
 
     await forwarder.registerRequestType(GsnRequestType.typeName, GsnRequestType.typeSuffix)
-    await forwarder.registerDomainSeparator(GsnDomainSeparatorType.name, GsnDomainSeparatorType.version)
+    await forwarder.registerDomainSeparator(defaultGsnConfig.domainSeparatorName, GsnDomainSeparatorType.version)
     await paymaster.setTrustedForwarder(forwarder.address)
     // approve uniswap to take our tokens.
     // @ts-ignore
@@ -91,8 +103,6 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
         relayWorker: relay,
         paymaster: paymaster.address,
         forwarder: forwarder.address,
-        pctRelayFee: '1',
-        baseRelayFee: '0',
         transactionCalldataGasUsed: '0',
         maxFeePerGas: gasPrice,
         maxPriorityFeePerGas: gasPrice,
@@ -110,14 +120,15 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       }
     }
 
-    const chainId = defaultEnvironment.chainId
+    const chainId = hardhatNodeChainId
     const dataToSign = new TypedRequestData(
+      defaultGsnConfig.domainSeparatorName,
       chainId,
       forwarder.address,
       relayRequest
     )
     signature = await getEip712Signature(
-      web3,
+      provider,
       dataToSign
     )
   })
@@ -141,14 +152,14 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
 
       it('should reject if unknown paymasterData', async () => {
         const req = mergeRelayRequest(relayRequest, { paymasterData: '0x1234' })
-        const signature = await getEip712Signature(web3, new TypedRequestData(1, forwarder.address, req))
-        assert.equal(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), '\'paymasterData: invalid length for Uniswap v1 exchange address\' -- Reason given: paymasterData: invalid length for Uniswap v1 exchange address.')
+        const signature = await getEip712Signature(provider, new TypedRequestData(defaultGsnConfig.domainSeparatorName, 1, forwarder.address, req))
+        assert.match(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), /paymasterData: invalid length for Uniswap v3 exchange address/)
       })
 
       it('should reject if unsupported uniswap in paymasterData', async () => {
         const req = mergeRelayRequest(relayRequest, { paymasterData: web3.eth.abi.encodeParameter('address', nonUniswap) })
-        const signature = await getEip712Signature(web3, new TypedRequestData(1, forwarder.address, req))
-        assert.equal(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), '\'unsupported token uniswap\' -- Reason given: unsupported token uniswap.')
+        const signature = await getEip712Signature(provider, new TypedRequestData(defaultGsnConfig.domainSeparatorName, 1, forwarder.address, req))
+        assert.match(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), /unsupported token uniswap/)
       })
     })
 
@@ -160,7 +171,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
 
       it('should reject if no token approval', async () => {
         const req = mergeRelayRequest(relayRequest, { paymasterData: web3.eth.abi.encodeParameter('address', uniswap.address) })
-        assert.equal(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), transferErc20Error)
+        assert.match(await revertReason(testHub.callPreRC(req, signature, '0x', 1e6)), transferErc20Error)
       })
 
       context('with token approved for paymaster', function () {
@@ -178,7 +189,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
 
         it('callPreRC should succeed with specific token/uniswap', async () => {
           const req = mergeRelayRequest(relayRequest, { paymasterData: web3.eth.abi.encodeParameter('address', uniswap.address) })
-          const signature = await getEip712Signature(web3, new TypedRequestData(1, forwarder.address, req))
+          const signature = await getEip712Signature(provider, new TypedRequestData(defaultGsnConfig.domainSeparatorName, 1, forwarder.address, req))
           const ret: any = await testHub.callPreRC.call(req, signature, '0x', 1e6)
           const decoded = web3.eth.abi.decodeParameters(['address', 'address', 'address', 'address'], ret.context) as any
           assert.equal(decoded[2], token.address)
@@ -200,8 +211,9 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
 
     it('should reject if incorrect signature', async () => {
       const wrongSignature = await getEip712Signature(
-        web3,
+        provider,
         new TypedRequestData(
+          defaultGsnConfig.domainSeparatorName,
           222,
           forwarder.address,
           relayRequest
@@ -210,7 +222,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       const gas = 5000000
 
       const req = mergeRelayRequest(relayRequest, { paymasterData: web3.eth.abi.encodeParameter('address', uniswap.address) })
-      const relayCall: any = await hub.relayCall.call(1e06, req, wrongSignature, '0x', {
+      const relayCall: any = await hub.relayCall.call(defaultGsnConfig.domainSeparatorName, 1e06, req, wrongSignature, '0x', {
         from: relay,
         gas
       })
@@ -227,8 +239,6 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       _relayRequest.request.nonce = (await forwarder.getNonce(from)).toString()
       _relayRequest.relayData.maxFeePerGas = 1e9.toString()
       _relayRequest.relayData.maxPriorityFeePerGas = 1e9.toString()
-      _relayRequest.relayData.pctRelayFee = '0'
-      _relayRequest.relayData.baseRelayFee = '0'
       _relayRequest.relayData.paymasterData = web3.eth.abi.encodeParameter('address', uniswap.address)
 
       // note that by default, ganache is buggy: getChainId returns 1337 but on-chain "chainid" returns 1.
@@ -236,19 +246,20 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       const chainId = await new Web3(web3.currentProvider as any).eth.getChainId()
 
       const dataToSign = new TypedRequestData(
+        defaultGsnConfig.domainSeparatorName,
         chainId,
         forwarder.address,
         _relayRequest
       )
       const signature = await getEip712Signature(
-        web3,
+        provider,
         dataToSign
       )
 
       const preBalance = await hub.balanceOf(paymaster.address)
 
       const externalGasLimit = 5e6.toString()
-      const ret = await hub.relayCall(10e6, _relayRequest, signature, '0x', {
+      const ret = await hub.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, _relayRequest, signature, '0x', {
         from: relay,
         gasPrice: 1e9,
         gas: externalGasLimit
@@ -279,7 +290,7 @@ contract('TokenPaymaster', ([from, relay, relayOwner, nonUniswap, burnAddress]) 
       const postBalance = await hub.balanceOf(paymaster.address)
 
       assert.ok(postBalance >= preBalance,
-                `expected paymaster balance not to be reduced: pre=${preBalance.toString()} post=${postBalance.toString()}`)
+        `expected paymaster balance not to be reduced: pre=${preBalance.toString()} post=${postBalance.toString()}`)
       // TODO: add test for relayed.args.charge, once gasUsedWithoutPost parameter is fixed (currently, its too high, and Paymaster "charges" too much)
       const postPaymasterTokens = await token.balanceOf(paymaster.address)
       console.log('Paymaster "earned" tokens:', postPaymasterTokens.sub(prePaymasterTokens).toString())

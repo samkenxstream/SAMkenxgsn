@@ -8,10 +8,19 @@ import "./TestPaymasterConfigurableMisbehavior.sol";
 
 contract TestRecipient is ERC2771Recipient {
 
-    string public override versionRecipient = "3.0.0-alpha.5+opengsn.test.irelayrecipient";
-
     constructor(address forwarder) {
         _setTrustedForwarder(forwarder);
+    }
+
+    // testing inner call gas estimation
+    uint256 private nothing1;
+    uint256 private nothing2;
+    uint256 private nothing3;
+    // solhint-disable-next-line no-complex-fallback
+    fallback() external payable {
+        nothing1 = type(uint256).max;
+        nothing2 = type(uint256).max;
+        nothing3 = type(uint256).max;
     }
 
     event Reverting(string message);
@@ -31,6 +40,10 @@ contract TestRecipient is ERC2771Recipient {
     receive() external payable {}
 
     event SampleRecipientEmitted(string message, address realSender, address msgSender, address origin, uint256 msgValue, uint256 gasLeft, uint256 balance);
+
+    function recipientRevert() public {
+        revert("this method reverts consistently");
+    }
 
     function emitMessage(string memory message) public payable returns (string memory) {
         uint256 gasLeft = gasleft();
@@ -73,4 +86,11 @@ contract TestRecipient is ERC2771Recipient {
         require(!doRevert);
     }
 
+    function withdrawFromSingletonWhitelistPaymaster(address payable singletonPaymaster) public {
+        TestRecipient(singletonPaymaster).withdrawBalance(1);
+    }
+
+    // only here for one method sig
+    // solhint-disable-next-line no-empty-blocks
+    function withdrawBalance(uint256 amount) public {}
 }

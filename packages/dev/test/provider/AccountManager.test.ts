@@ -1,17 +1,16 @@
 import chai from 'chai'
 import chaiAsPromised from 'chai-as-promised'
-import { recoverTypedSignature_v4 } from 'eth-sig-util'
+import { JsonRpcProvider, StaticJsonRpcProvider } from '@ethersproject/providers'
+import { SignTypedDataVersion, recoverTypedSignature } from '@metamask/eth-sig-util'
 import sinon from 'sinon'
 import sinonChai from 'sinon-chai'
-import { HttpProvider } from 'web3-core'
 import { constants } from '@openzeppelin/test-helpers'
 
 import { AccountManager } from '@opengsn/provider/dist/AccountManager'
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
-import { configureGSN } from '../TestUtils'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { isSameAddress } from '@opengsn/common/dist/Utils'
+import { RelayRequest, TypedRequestData, isSameAddress } from '@opengsn/common'
+
+import { configureGSN, hardhatNodeChainId } from '../TestUtils'
+import { defaultGsnConfig } from '@opengsn/provider'
 
 const { expect, assert } = chai.use(chaiAsPromised)
 
@@ -20,9 +19,15 @@ chai.use(sinonChai)
 contract('AccountManager', function (accounts) {
   const address = '0x982a8CbE734cb8c29A6a7E02a3B0e4512148F6F9'
   const privateKey = '0xd353907ab062133759f149a3afcb951f0f746a65a60f351ba05a3ebf26b67f5c'
+  const privateKeyAllZero = '0x0000000000000000000000000000000000000000000000000000000000000000'
   let accountManager: AccountManager
+  let ethersProvider: JsonRpcProvider
+
   before(function () {
-    accountManager = new AccountManager(web3.currentProvider as HttpProvider, defaultEnvironment.chainId, config)
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
+    accountManager = new AccountManager(ethersProvider, hardhatNodeChainId, config)
     sinon.spy(accountManager)
   })
   const config = configureGSN({
@@ -42,12 +47,16 @@ contract('AccountManager', function (accounts) {
       const invalidPrivateKey = privateKey.replace('a', '')
       await expect(() => {
         accountManager.addAccount(invalidPrivateKey)
+      }).to.throw('Expected private key to be an Uint8Array with length 32')
+
+      await expect(() => {
+        accountManager.addAccount(privateKeyAllZero)
       }).to.throw('Private key does not satisfy the curve requirements')
     })
   })
 
   describe('#newAccount()', function () {
-    const accountManager = new AccountManager(web3.currentProvider as HttpProvider, defaultEnvironment.chainId, config)
+    const accountManager = new AccountManager(ethersProvider, hardhatNodeChainId, config)
 
     it('should create a new keypair, return it and save it internally', function () {
       const keypair = accountManager.newAccount()
@@ -72,8 +81,6 @@ contract('AccountManager', function (accounts) {
         validUntilTime: '0'
       },
       relayData: {
-        pctRelayFee: '1',
-        baseRelayFee: '1',
         transactionCalldataGasUsed: '0',
         maxFeePerGas: '1',
         maxPriorityFeePerGas: '1',
@@ -96,14 +103,16 @@ contract('AccountManager', function (accounts) {
     it('should use internally controlled keypair for signing if available', async function () {
       relayRequest.request.from = address
       const signedData = new TypedRequestData(
-        defaultEnvironment.chainId,
+        defaultGsnConfig.domainSeparatorName,
+        hardhatNodeChainId,
         constants.ZERO_ADDRESS,
         relayRequestWithoutExtraData(relayRequest)
       )
-      const signature = await accountManager.sign(relayRequest)
-      const rec = recoverTypedSignature_v4({
+      const signature = await accountManager.sign(defaultGsnConfig.domainSeparatorName, relayRequest)
+      const rec = recoverTypedSignature({
         data: signedData,
-        sig: signature
+        signature,
+        version: SignTypedDataVersion.V4
       })
       assert.ok(isSameAddress(relayRequest.request.from.toLowerCase(), rec))
       expect(accountManager._signWithControlledKey).to.have.been.calledWith(privateKey, signedData)
@@ -112,14 +121,16 @@ contract('AccountManager', function (accounts) {
     it('should ask provider to sign if key is not controlled', async function () {
       relayRequest.request.from = accounts[0]
       const signedData = new TypedRequestData(
-        defaultEnvironment.chainId,
+        defaultGsnConfig.domainSeparatorName,
+        hardhatNodeChainId,
         constants.ZERO_ADDRESS,
         relayRequestWithoutExtraData(relayRequest)
       )
-      const signature = await accountManager.sign(relayRequest)
-      const rec = recoverTypedSignature_v4({
+      const signature = await accountManager.sign(defaultGsnConfig.domainSeparatorName, relayRequest)
+      const rec = recoverTypedSignature({
         data: signedData,
-        sig: signature
+        signature,
+        version: SignTypedDataVersion.V4
       })
       assert.ok(isSameAddress(relayRequest.request.from.toLowerCase(), rec))
       expect(accountManager._signWithProvider).to.have.been.calledWith(signedData)
@@ -127,7 +138,7 @@ contract('AccountManager', function (accounts) {
     })
     it('should throw if web3 fails to sign with requested address', async function () {
       relayRequest.request.from = '0x4cfb3f70bf6a80397c2e634e5bdd85bc0bb189ee'
-      const promise = accountManager.sign(relayRequest)
+      const promise = accountManager.sign(defaultGsnConfig.domainSeparatorName, relayRequest)
       await expect(promise).to.be.eventually.rejectedWith('Failed to sign relayed transaction for 0x4cfb3f70bf6a80397c2e634e5bdd85bc0bb189ee')
     })
   })

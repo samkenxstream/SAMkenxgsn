@@ -13,6 +13,7 @@ library RelayHubValidator {
 
     /// @notice Validate that encoded `relayCall` is properly packed without any extra bytes
     function verifyTransactionPacking(
+        string calldata domainSeparatorName,
         GsnTypes.RelayRequest calldata relayRequest,
         bytes calldata signature,
         bytes calldata approvalData
@@ -23,16 +24,16 @@ library RelayHubValidator {
         // dynamic member is 1 word offset to actual value, which is 1-word length and ceil(length/32) words for data
         // relayCall has 5 method params,
         // relayRequest: 2 members
-        // relayData 9 members
+        // relayData 8 members
         // ForwardRequest: 7 members
-        // total 22 32-byte words if all dynamic params are zero-length.
-        uint256 expectedMsgDataLen = 4 + 23 * 32 +
+        // total 21 32-byte words if all dynamic params are zero-length.
+        uint256 expectedMsgDataLen = 4 + 22 * 32 +
+            dynamicParamSize(bytes(domainSeparatorName)) +
             dynamicParamSize(signature) +
             dynamicParamSize(approvalData) +
             dynamicParamSize(relayRequest.request.data) +
             dynamicParamSize(relayRequest.relayData.paymasterData);
         // zero-length signature is allowed in a batch relay transaction
-        require(signature.length <= 65, "invalid signature length");
         require(expectedMsgDataLen == msg.data.length, "extra msg.data bytes" );
     }
 

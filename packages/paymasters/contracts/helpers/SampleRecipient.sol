@@ -7,14 +7,18 @@ import "@opengsn/contracts/src/ERC2771Recipient.sol";
 // pass-through paymaster.
 // should override it and re-implement acceptRelayedCall. use "super" on success
 contract SampleRecipient is ERC2771Recipient {
-    string public override versionRecipient = "3.0.0-alpha.5+opengsn.sample.irelayrecipient";
 
     event Sender( address _msgSenderFunc, address sender );
 
     function setForwarder(address forwarder) public {
         _setTrustedForwarder(forwarder);
     }
+
     function something() public {
+        emit Sender( _msgSender(), msg.sender );
+    }
+
+    function nothing() public {
         emit Sender( _msgSender(), msg.sender );
     }
 }

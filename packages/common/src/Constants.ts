@@ -1,5 +1,4 @@
 import BN from 'bn.js'
-import { toBN } from 'web3-utils'
 
 import paymasterAbi from './interfaces/IPaymaster.json'
 import relayHubAbi from './interfaces/IRelayHub.json'
@@ -8,6 +7,7 @@ import stakeManagerAbi from './interfaces/IStakeManager.json'
 import penalizerAbi from './interfaces/IPenalizer.json'
 import relayRegistrarAbi from './interfaces/IRelayRegistrar.json'
 import { getERC165InterfaceID } from './Utils'
+import { toBN } from './web3js/Web3JSUtils'
 
 const dayInSec = 24 * 60 * 60
 const weekInSec = dayInSec * 7
@@ -41,4 +41,14 @@ export const erc165Interfaces = {
   relayRegistrar: getERC165InterfaceID(relayRegistrarAbi as any),
   relayHub: getERC165InterfaceID(relayHubAbi as any),
   stakeManager: getERC165InterfaceID(stakeManagerAbi as any)
+}
+
+export const RelayCallStatusCodes = {
+  OK: new BN('0'),
+  RelayedCallFailed: new BN('1'),
+  RejectedByPreRelayed: new BN('2'),
+  RejectedByForwarder: new BN('3'),
+  RejectedByRecipientRevert: new BN('4'),
+  PostRelayedFailed: new BN('5'),
+  PaymasterBalanceChanged: new BN('6')
 }

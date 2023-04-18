@@ -1,23 +1,30 @@
 import BN from 'bn.js'
 import { ether, expectEvent } from '@openzeppelin/test-helpers'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 
 import {
   ArbRelayHubInstance,
   ForwarderInstance,
-  StakeManagerInstance, TestTokenInstance
+  StakeManagerInstance,
+  TestRecipientInstance,
+  TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
 import {
+  RelayRequest,
+  TypedRequestData,
   constants,
   defaultEnvironment,
   environments,
   getEip712Signature,
   splitRelayUrlForRegistrar
 } from '@opengsn/common'
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
+
 import { TransactionRelayed } from '@opengsn/contracts/types/truffle-contracts/RelayHub'
 import { RelayRegistrarInstance } from '@opengsn/contracts'
+import { defaultGsnConfig } from '@opengsn/provider'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
+
+import { hardhatNodeChainId } from '../TestUtils'
 
 const TestToken = artifacts.require('TestToken')
 const Forwarder = artifacts.require('Forwarder')
@@ -65,13 +72,14 @@ contract('ArbRelayHub', function ([from, relayWorker, relayManager, relayOwner]:
   context('#relayCall()', function () {
     const transactionCalldataGasUsed = 7e6.toString()
 
+    let testRecipient: TestRecipientInstance
     let relayRequest: RelayRequest
     let signature: string
 
     // TODO: extract repetitive test code to test utils
     before('prepare the relay request and relay worker', async function () {
-      await registerForwarderForGsn(forwarder)
-      const testRecipient = await TestRecipient.new(forwarder.address)
+      await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarder)
+      testRecipient = await TestRecipient.new(forwarder.address)
       const paymaster = await TestPaymasterEverythingAccepted.new()
       await paymaster.setTrustedForwarder(forwarder.address)
       await paymaster.setRelayHub(arbRelayHub.address)
@@ -89,7 +97,7 @@ contract('ArbRelayHub', function ([from, relayWorker, relayManager, relayOwner]:
       })
       await stakeManager.authorizeHubByOwner(relayManager, arbRelayHub.address, { from: relayOwner })
       await arbRelayHub.addRelayWorkers([relayWorker], { from: relayManager })
-      await relayRegistrar.registerRelayServer(arbRelayHub.address, '0', '0', splitRelayUrlForRegistrar(''), { from: relayManager })
+      await relayRegistrar.registerRelayServer(arbRelayHub.address, splitRelayUrlForRegistrar(''), { from: relayManager })
 
       relayRequest = {
         request: {
@@ -102,8 +110,6 @@ contract('ArbRelayHub', function ([from, relayWorker, relayManager, relayOwner]:
           validUntilTime: '0'
         },
         relayData: {
-          pctRelayFee: '0',
-          baseRelayFee: '0',
           transactionCalldataGasUsed,
           maxFeePerGas: 1e8.toString(),
           maxPriorityFeePerGas: 1e8.toString(),
@@ -111,33 +117,38 @@ contract('ArbRelayHub', function ([from, relayWorker, relayManager, relayOwner]:
           forwarder: forwarder.address,
           paymaster: paymaster.address,
           paymasterData: '0x',
-          clientId: ''
+          clientId: '0'
         }
       }
       const dataToSign = new TypedRequestData(
-        defaultEnvironment.chainId,
+        defaultGsnConfig.domainSeparatorName,
+        hardhatNodeChainId,
         forwarder.address,
         relayRequest
       )
+
+      // @ts-ignore
+      const currentProviderHost = web3.currentProvider.host
+      const provider = new StaticJsonRpcProvider(currentProviderHost)
       signature = await getEip712Signature(
-        web3,
+        provider,
         dataToSign
       )
     })
 
     it('should use aggregateGasleft results when calculating charge', async function () {
-      const res = await arbRelayHub.relayCall(10e6, relayRequest, signature, '0x', {
+      const res = await arbRelayHub.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signature, '0x', {
         from: relayWorker,
         gas: 10000000,
         gasPrice: 1e8.toString()
       })
 
-      await expectEvent.inTransaction(res.tx, TestRecipient, 'SampleRecipientEmitted', {
+      await expectEvent.inTransaction(res.tx, testRecipient, 'SampleRecipientEmitted', {
         message: 'Method with no parameters'
       })
 
       // just an observed value
-      const expectedGasUsed = 24000000
+      const expectedGasUsed = 25000000
 
       const transactionRelayedEvent = res.logs[0].args as TransactionRelayed['args']
       const charge = transactionRelayedEvent.charge.div(new BN('100000000'))

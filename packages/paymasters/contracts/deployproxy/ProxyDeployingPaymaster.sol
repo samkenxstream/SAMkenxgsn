@@ -10,11 +10,11 @@ import "./ProxyFactory.sol";
 contract ProxyDeployingPaymaster is TokenPaymaster {
     using Address for address;
 
-    string public override versionPaymaster = "3.0.0-alpha.5+opengsn.proxydeploying.ipaymaster";
+    string public override versionPaymaster = "3.0.0-beta.3+opengsn.proxydeploying.ipaymaster";
 
     ProxyFactory public proxyFactory;
 
-    constructor(IUniswap[] memory _uniswaps, ProxyFactory _proxyFactory) TokenPaymaster(_uniswaps)  {
+    constructor(IUniswapV3[] memory _uniswaps, ProxyFactory _proxyFactory) TokenPaymaster(_uniswaps)  {
         proxyFactory = _proxyFactory;
     }
 
@@ -60,7 +60,7 @@ contract ProxyDeployingPaymaster is TokenPaymaster {
     returns (bytes memory, bool revertOnRecipientRevert) {
         (signature, approvalData);
 
-        (IERC20 token, IUniswap uniswap) = _getToken(relayRequest.relayData.paymasterData);
+        (IERC20 token, IUniswapV3 uniswap) = _getToken(relayRequest.relayData.paymasterData);
         (address payer, uint256 tokenPrecharge) = _calculatePreCharge(token, uniswap, relayRequest, maxPossibleGas);
         if (!payer.isContract()) {
             deployProxy(relayRequest.request.from);
@@ -87,7 +87,7 @@ contract ProxyDeployingPaymaster is TokenPaymaster {
     internal
     override
     virtual {
-        (address payer,, uint256 tokenPrecharge, uint256 valueRequested,,IERC20 token, IUniswap uniswap) = abi.decode(context, (address, address, uint256, uint256, address, IERC20, IUniswap));
+        (address payer,, uint256 tokenPrecharge, uint256 valueRequested,,IERC20 token, IUniswapV3 uniswap) = abi.decode(context, (address, address, uint256, uint256, address, IERC20, IUniswapV3));
         _postRelayedCallInternal(payer, tokenPrecharge, valueRequested, gasUseWithoutPost, relayData, token, uniswap);
     }
 

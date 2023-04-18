@@ -1,13 +1,22 @@
 /* eslint-disable no-global-assign */
 
 import BN from 'bn.js'
-import { HttpProvider } from 'web3-core'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { ether, expectEvent, expectRevert } from '@openzeppelin/test-helpers'
 import { toBuffer, PrefixedHexString } from 'ethereumjs-util'
 
-import { getEip712Signature } from '@opengsn/common/dist/Utils'
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
+import {
+  ContractInteractor,
+  ForwardRequest,
+  GSNContractsDeployment,
+  RelayData,
+  RelayRequest,
+  TypedRequestData,
+  constants,
+  defaultEnvironment,
+  getEip712Signature,
+  splitRelayUrlForRegistrar
+} from '@opengsn/common'
 
 import {
   RelayHubInstance,
@@ -17,14 +26,12 @@ import {
   ForwarderInstance,
   TestPaymasterConfigurableMisbehaviorInstance, RelayRegistrarInstance, TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { constants, ContractInteractor, GSNContractsDeployment, splitRelayUrlForRegistrar } from '@opengsn/common'
-import { ForwardRequest } from '@opengsn/common/dist/EIP712/ForwardRequest'
-import { RelayData } from '@opengsn/common/dist/EIP712/RelayData'
-import { createServerLogger } from '@opengsn/relay/dist/ServerWinstonLogger'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
+
+import { createServerLogger } from '@opengsn/logger/dist/ServerWinstonLogger'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
 
 import { deployHub, encodeRevertReason } from './TestUtils'
+import { defaultGsnConfig } from '@opengsn/provider'
 
 const TestToken = artifacts.require('TestToken')
 const StakeManager = artifacts.require('StakeManager')
@@ -66,22 +73,28 @@ async function makeRequest (
   const deployment: GSNContractsDeployment = {
     relayHubAddress: relayHubInstance.address
   }
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const provider = new StaticJsonRpcProvider(currentProviderHost)
   const contractInteractor = new ContractInteractor({
+    domainSeparatorName: defaultGsnConfig.domainSeparatorName,
     environment: defaultEnvironment,
-    provider: web3.eth.currentProvider as HttpProvider,
+    provider,
     logger: createServerLogger('error', '', ''),
     deployment,
     maxPageSize: Number.MAX_SAFE_INTEGER
   })
+  await contractInteractor.init()
   filledRequest.relayData.transactionCalldataGasUsed =
-    contractInteractor.estimateCalldataCostForRequest(filledRequest, {
+    await contractInteractor.estimateCalldataCostForRequest(filledRequest, {
       maxApprovalDataLength: 0,
       maxPaymasterDataLength: 0
     })
 
   const sig = await getEip712Signature(
-    web3,
+    provider,
     new TypedRequestData(
+      defaultGsnConfig.domainSeparatorName,
       chainId,
       filledRequest.relayData.forwarder,
       filledRequest
@@ -126,9 +139,6 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
   let paymaster: string
   let forwarder: string
 
-  const baseRelayFee = '0'
-  const pctRelayFee = '0'
-
   before(async function () {
     const stake = ether('2')
     testToken = await TestToken.new()
@@ -144,7 +154,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
     const testUtil = await TestUtil.new()
     chainId = (await testUtil.libGetChainID()).toNumber()
 
-    await registerForwarderForGsn(forwarderInstance)
+    await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarderInstance)
 
     target = recipientContract.address
     relayHub = relayHubInstance.address
@@ -160,7 +170,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
     await stakeManager.authorizeHubByOwner(relayManager, relayHub, { from: relayOwner })
 
     await relayHubInstance.addRelayWorkers([relayWorker], { from: relayManager })
-    await relayRegistrar.registerRelayServer(relayHub, baseRelayFee, pctRelayFee, splitRelayUrlForRegistrar('url'), { from: relayManager })
+    await relayRegistrar.registerRelayServer(relayHub, splitRelayUrlForRegistrar('url'), { from: relayManager })
   })
 
   describe('paymaster commitments', function () {
@@ -194,8 +204,6 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
           validUntilTime: '0'
         },
         relayData: {
-          pctRelayFee,
-          baseRelayFee,
           transactionCalldataGasUsed: '0',
           maxFeePerGas: '1',
           maxPriorityFeePerGas: '1',
@@ -223,7 +231,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -249,7 +257,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
       // @ts-ignore
       const hugeApprovalData = '0x' + 'ef'.repeat(parseInt(gasAndDataLimits.calldataSizeLimit))
       await expectRevert(
-        relayHubInstance.relayCall(10e6, r.req, r.sig, hugeApprovalData, {
+        relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, hugeApprovalData, {
           from: relayWorker,
           gas: externalGasLimit,
           gasPrice
@@ -270,8 +278,8 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       const gasAndDataLimits = await paymasterContract.getGasAndDataLimits()
       // @ts-ignore
-      const hugeApprovalData = '0x' + 'ef'.repeat(parseInt(gasAndDataLimits.calldataSizeLimit) - 1062)
-      const relayCallParams: [number, RelayRequest, string, string, Truffle.TransactionDetails?] = [10e6, r.req, r.sig, hugeApprovalData]
+      const hugeApprovalData = '0x' + 'ef'.repeat(parseInt(gasAndDataLimits.calldataSizeLimit) - 1094)
+      const relayCallParams: [string, number, RelayRequest, string, string, Truffle.TransactionDetails?] = [defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, hugeApprovalData]
       const method = relayHubInstance.contract.methods.relayCall(...relayCallParams)
       // @ts-ignore
       assert.equal(gasAndDataLimits.calldataSizeLimit, toBuffer(method.encodeABI()).length.toString(),
@@ -298,8 +306,8 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       const gasAndDataLimits = await paymasterContract.getGasAndDataLimits()
       // @ts-ignore
-      const hugeApprovalData = '0x' + 'ef'.repeat(parseInt(gasAndDataLimits.calldataSizeLimit) - 1062)
-      const relayCallParams: [number, RelayRequest, string, string, Truffle.TransactionDetails?] = [10e6, r.req, r.sig, hugeApprovalData]
+      const hugeApprovalData = '0x' + 'ef'.repeat(parseInt(gasAndDataLimits.calldataSizeLimit) - 1094)
+      const relayCallParams: [string, number, RelayRequest, string, string, Truffle.TransactionDetails?] = [defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, hugeApprovalData]
       const method = relayHubInstance.contract.methods.relayCall(...relayCallParams)
       // @ts-ignore
       assert.equal(gasAndDataLimits.calldataSizeLimit, toBuffer(method.encodeABI()).length.toString(),
@@ -336,14 +344,14 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
       // @ts-ignore
       const maxAcceptanceBudget = parseInt(gasLimits.acceptanceBudget)
       // fail if a bit lower
-      expectRevert(relayHubInstance.relayCall(maxAcceptanceBudget - 1, r.req, r.sig, '0x', {
+      expectRevert(relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, maxAcceptanceBudget - 1, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
       }), 'acceptance budget too high')
 
       // but succeed if the value is OK
-      const res = await relayHubInstance.relayCall(maxAcceptanceBudget, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, maxAcceptanceBudget, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -365,7 +373,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
         }
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -396,7 +404,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      expectRevert(relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      expectRevert(relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -414,7 +422,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -437,7 +445,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -465,7 +473,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -484,7 +492,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice
@@ -509,7 +517,7 @@ contract('Paymaster Commitment', function ([_, relayOwner, relayManager, relayWo
 
       }, sharedRelayRequestData, chainId, forwarderInstance, relayHubInstance)
 
-      const res = await relayHubInstance.relayCall(10e6, r.req, r.sig, '0x', {
+      const res = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, r.req, r.sig, '0x', {
         from: relayWorker,
         gas: externalGasLimit,
         gasPrice

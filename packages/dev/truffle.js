@@ -19,6 +19,9 @@ module.exports = {
   contracts_build_directory: '../cli/src/compiled',
   contracts_directory: '../contracts/solpp',
 
+  plugins: [
+    'truffle-plugin-stdjsonin'
+  ],
   networks: {
 
     development: {
@@ -28,11 +31,6 @@ module.exports = {
       port: 8545,
       network_id: '*'
     },
-    // coverage: { // coverage/trace provider. note that it currently can't run extrnal-process relay.
-    //   provider: require('./coverage-prov.js'),
-    //   verbose: process.env.VERBOSE,
-    //   network_id: '*'
-    // },
     npmtest: { // used from "npm test". see package.json
       verbose: process.env.VERBOSE,
       host: '127.0.0.1',

@@ -1,11 +1,12 @@
-import { SampleRecipientInstance, VerifyingPaymasterInstance } from '@opengsn/paymasters/types/truffle-contracts'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
+import { SampleRecipientInstance, VerifyingPaymasterInstance } from '../types/truffle-contracts'
 
 import { GSNUnresolvedConstructorInput, RelayProvider, GSNConfig } from '@opengsn/provider'
 import { GsnTestEnvironment } from '@opengsn/cli/dist/GsnTestEnvironment'
 import { expectRevert } from '@openzeppelin/test-helpers'
 
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { AsyncDataCallback } from '@opengsn/common/dist/types/Aliases'
+import { RelayRequest, ApprovalDataCallback } from '@opengsn/common'
+
 import { bufferToHex, privateToAddress, PrefixedHexString } from 'ethereumjs-util'
 import { randomBytes } from 'crypto'
 import { getRequestHash, packForwardRequest, packRelayData, signRelayRequest } from '../src/VerifyingPaymasterUtils'
@@ -15,6 +16,10 @@ const VerifyingPaymaster = artifacts.require('VerifyingPaymaster')
 const SampleRecipient = artifacts.require('SampleRecipient')
 
 contract('VerifyingPaymaster', ([from]) => {
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const provider = new StaticJsonRpcProvider(currentProviderHost)
+
   describe('#getRequestHash', () => {
     let req: RelayRequest
     let pm: VerifyingPaymasterInstance
@@ -32,8 +37,6 @@ contract('VerifyingPaymaster', ([from]) => {
           gas: '3'
         },
         relayData: {
-          pctRelayFee: '3',
-          baseRelayFee: '4',
           maxFeePerGas: '5',
           maxPriorityFeePerGas: '5',
           transactionCalldataGasUsed: '0',
@@ -67,11 +70,11 @@ contract('VerifyingPaymaster', ([from]) => {
     let privkey: Buffer
     let signer: string
 
-    let mockApprovalFunc: AsyncDataCallback
+    let mockApprovalFunc: ApprovalDataCallback
 
     // simulated call to backend, to verify request
     async function mockGetApprovalData (relayRequest: RelayRequest): Promise<PrefixedHexString> {
-      return await mockApprovalFunc(relayRequest)
+      return await mockApprovalFunc(relayRequest, '')
     }
 
     before(async () => {
@@ -106,7 +109,7 @@ contract('VerifyingPaymaster', ([from]) => {
         paymasterAddress: pm.address
       }
       const input: GSNUnresolvedConstructorInput = {
-        provider: web3.currentProvider as HttpProvider,
+        provider,
         config: gsnConfig,
         overrideDependencies: {
           asyncApprovalData: mockGetApprovalData

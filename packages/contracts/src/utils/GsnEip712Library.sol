@@ -19,7 +19,7 @@ library GsnEip712Library {
     //copied from Forwarder (can't reference string constants even from another library)
     string public constant GENERIC_PARAMS = "address from,address to,uint256 value,uint256 gas,uint256 nonce,bytes data,uint256 validUntilTime";
 
-    bytes public constant RELAYDATA_TYPE = "RelayData(uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint256 pctRelayFee,uint256 baseRelayFee,uint256 transactionCalldataGasUsed,address relayWorker,address paymaster,address forwarder,bytes paymasterData,uint256 clientId)";
+    bytes public constant RELAYDATA_TYPE = "RelayData(uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint256 transactionCalldataGasUsed,address relayWorker,address paymaster,address forwarder,bytes paymasterData,uint256 clientId)";
 
     string public constant RELAY_REQUEST_NAME = "RelayRequest";
     string public constant RELAY_REQUEST_SUFFIX = string(abi.encodePacked("RelayData relayData)", RELAYDATA_TYPE));
@@ -67,21 +67,37 @@ library GsnEip712Library {
         require(abi.decode(ret, (bool)), "invalid forwarder for recipient");
     }
 
-    function verifySignature(GsnTypes.RelayRequest calldata relayRequest, bytes calldata signature) internal view {
+    function verifySignature(
+        string memory domainSeparatorName,
+        GsnTypes.RelayRequest calldata relayRequest,
+        bytes calldata signature
+    ) internal view {
         (bytes memory suffixData) = splitRequest(relayRequest);
-        bytes32 _domainSeparator = domainSeparator(relayRequest.relayData.forwarder);
+        bytes32 _domainSeparator = domainSeparator(domainSeparatorName, relayRequest.relayData.forwarder);
         IForwarder forwarder = IForwarder(payable(relayRequest.relayData.forwarder));
         forwarder.verify(relayRequest.request, _domainSeparator, RELAY_REQUEST_TYPEHASH, suffixData, signature);
     }
 
-    function verify(GsnTypes.RelayRequest calldata relayRequest, bytes calldata signature) internal view {
+    function verify(
+        string memory domainSeparatorName,
+        GsnTypes.RelayRequest calldata relayRequest,
+        bytes calldata signature
+    ) internal view {
         verifyForwarderTrusted(relayRequest);
-        verifySignature(relayRequest, signature);
+        verifySignature(domainSeparatorName, relayRequest, signature);
     }
 
-    function execute(GsnTypes.RelayRequest calldata relayRequest, bytes calldata signature) internal returns (bool forwarderSuccess, bool callSuccess, bytes memory ret) {
+    function execute(
+        string memory domainSeparatorName,
+        GsnTypes.RelayRequest calldata relayRequest,
+        bytes calldata signature
+    ) internal returns (
+        bool forwarderSuccess,
+        bool callSuccess,
+        bytes memory ret
+    ) {
         (bytes memory suffixData) = splitRequest(relayRequest);
-        bytes32 _domainSeparator = domainSeparator(relayRequest.relayData.forwarder);
+        bytes32 _domainSeparator = domainSeparator(domainSeparatorName, relayRequest.relayData.forwarder);
         /* solhint-disable-next-line avoid-low-level-calls */
         (forwarderSuccess, ret) = relayRequest.relayData.forwarder.call(
             abi.encodeWithSelector(IForwarder.execute.selector,
@@ -102,9 +118,9 @@ library GsnEip712Library {
         MinLibBytes.truncateInPlace(data, MAX_RETURN_SIZE);
     }
 
-    function domainSeparator(address forwarder) internal view returns (bytes32) {
+    function domainSeparator(string memory name, address forwarder) internal view returns (bytes32) {
         return hashDomain(EIP712Domain({
-            name : "GSN Relayed Transaction",
+            name : name,
             version : "3",
             chainId : getChainID(),
             verifyingContract : forwarder
@@ -132,8 +148,6 @@ library GsnEip712Library {
                 RELAYDATA_TYPEHASH,
                 req.maxFeePerGas,
                 req.maxPriorityFeePerGas,
-                req.pctRelayFee,
-                req.baseRelayFee,
                 req.transactionCalldataGasUsed,
                 req.relayWorker,
                 req.paymaster,

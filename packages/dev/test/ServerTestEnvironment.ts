@@ -4,9 +4,24 @@ import Web3 from 'web3'
 import crypto from 'crypto'
 import sinon from 'sinon'
 import { HttpProvider } from 'web3-core'
-import { toHex } from 'web3-utils'
+import { JsonRpcProvider, StaticJsonRpcProvider } from '@ethersproject/providers'
+import { toBN, toHex } from 'web3-utils'
 import * as ethUtils from 'ethereumjs-util'
-import { Address } from '@opengsn/common/dist/types/Aliases'
+import {
+  Address,
+  ContractInteractor,
+  GSNContractsDeployment,
+  GsnTransactionDetails,
+  PingResponse,
+  RegistrarRelayInfo,
+  RelayHubConfiguration,
+  RelayInfo,
+  RelayTransactionRequest,
+  constants,
+  defaultEnvironment,
+  ether,
+  removeHexPrefix
+} from '@opengsn/common'
 import {
   IERC2771RecipientInstance,
   IForwarderInstance,
@@ -17,34 +32,35 @@ import {
   TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
 import { assertRelayAdded, getTemporaryWorkdirs, ServerWorkdirs } from './ServerTestUtils'
-import { ContractInteractor } from '@opengsn/common/dist/ContractInteractor'
-import { GsnTransactionDetails } from '@opengsn/common/dist/types/GsnTransactionDetails'
-import { PingResponse } from '@opengsn/common/dist/PingResponse'
+
 import { KeyManager } from '@opengsn/relay/dist/KeyManager'
 import { PrefixedHexString } from 'ethereumjs-util'
 import { RelayClient } from '@opengsn/provider/dist/RelayClient'
-import { RelayInfo } from '@opengsn/common/dist/types/RelayInfo'
-import { RelayRegisteredEventInfo } from '@opengsn/common/dist/types/GSNContractsDataTypes'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
+
 import { RelayServer } from '@opengsn/relay/dist/RelayServer'
-import { configureServer, ServerConfigParams, serverDefaultConfiguration } from '@opengsn/relay/dist/ServerConfigParams'
+import {
+  configureServer,
+  ServerConfigParams,
+  serverDefaultConfiguration,
+  ServerDependencies
+} from '@opengsn/relay/dist/ServerConfigParams'
 import { TxStoreManager } from '@opengsn/relay/dist/TxStoreManager'
-import { GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
-import { constants } from '@opengsn/common/dist/Constants'
+import { defaultGsnConfig, GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
+
 import { deployHub } from './TestUtils'
-import { ether, removeHexPrefix } from '@opengsn/common/dist/Utils'
-import { RelayTransactionRequest } from '@opengsn/common/dist/types/RelayTransactionRequest'
+
 import RelayHubABI from '@opengsn/common/dist/interfaces/IRelayHub.json'
 import StakeManagerABI from '@opengsn/common/dist/interfaces/IStakeManager.json'
 import PayMasterABI from '@opengsn/common/dist/interfaces/IPaymaster.json'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
-import { RelayHubConfiguration } from '@opengsn/common/dist/types/RelayHubConfiguration'
-import { createServerLogger } from '@opengsn/relay/dist/ServerWinstonLogger'
+
+import { createServerLogger } from '@opengsn/logger/dist/ServerWinstonLogger'
 import { TransactionManager } from '@opengsn/relay/dist/TransactionManager'
 import { GasPriceFetcher } from '@opengsn/relay/dist/GasPriceFetcher'
-import { GSNContractsDeployment } from '@opengsn/common/dist/GSNContractsDeployment'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
+
 import { ReputationManager } from '@opengsn/relay/dist/ReputationManager'
 import { ReputationStoreManager } from '@opengsn/relay/dist/ReputationStoreManager'
+import { Web3MethodsBuilder } from '@opengsn/relay/dist/Web3MethodsBuilder'
 
 const Forwarder = artifacts.require('Forwarder')
 const Penalizer = artifacts.require('Penalizer')
@@ -66,8 +82,6 @@ export interface PrepareRelayRequestOption {
   to: string
   from: string
   paymaster: string
-  pctRelayFee: number
-  baseRelayFee: string
 }
 
 export class ServerTestEnvironment {
@@ -93,14 +107,17 @@ export class ServerTestEnvironment {
    * Note: do not call methods of contract interactor inside Test Environment. It may affect Profiling Test.
    */
   contractInteractor!: ContractInteractor
+  web3MethodsBuilder!: Web3MethodsBuilder
 
   relayClient!: RelayClient
   provider: HttpProvider
+  ethersProvider: JsonRpcProvider
   web3: Web3
   relayServer!: RelayServer
 
   constructor (provider: HttpProvider, accounts: Address[]) {
     this.provider = provider
+    this.ethersProvider = new StaticJsonRpcProvider(this.provider.host)
     this.web3 = new Web3(this.provider)
     this.relayOwner = accounts[4]
   }
@@ -122,7 +139,7 @@ export class ServerTestEnvironment {
     this.forwarder = await Forwarder.new()
     this.recipient = await TestRecipient.new(this.forwarder.address)
     this.paymaster = await TestPaymasterEverythingAccepted.new()
-    await registerForwarderForGsn(this.forwarder)
+    await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, this.forwarder)
 
     await this.paymaster.setTrustedForwarder(this.forwarder.address)
     await this.paymaster.setRelayHub(this.relayHub.address)
@@ -138,7 +155,7 @@ export class ServerTestEnvironment {
       const maxPageSize = Number.MAX_SAFE_INTEGER
       this.contractInteractor = new ContractInteractor({
         environment: defaultEnvironment,
-        provider: this.provider,
+        provider: this.ethersProvider,
         logger,
         maxPageSize,
         deployment: {
@@ -153,9 +170,12 @@ export class ServerTestEnvironment {
         managerStakeTokenAddress: this.testToken.address
       })
     }
+    const resolvedDeployment = this.contractInteractor.getDeployment()
+    this.web3MethodsBuilder = new Web3MethodsBuilder(web3, resolvedDeployment)
+
     const mergedConfig = Object.assign({}, shared, clientConfig)
     this.relayClient = new RelayClient({
-      provider: this.provider,
+      provider: this.ethersProvider,
       config: mergedConfig
     })
     await this.relayClient.init()
@@ -167,15 +187,16 @@ export class ServerTestEnvironment {
     await this.fundServer()
     await this.relayServer.init()
     // initialize server - gas price, stake, owner, etc, whatever
-    let latestBlock = await this.web3.eth.getBlock('latest')
+    let latestBlock = await this.ethersProvider.getBlock('latest')
 
-    await this.relayServer._worker(latestBlock.number)
-    latestBlock = await this.web3.eth.getBlock('latest')
+    await this.relayServer._worker(latestBlock)
+    latestBlock = await this.ethersProvider.getBlock('latest')
     await this.stakeAndAuthorizeHub(ether('1'), unstakeDelay)
     // This run should call 'registerRelayServer' and 'addWorkers'
-    const receipts = await this.relayServer._worker(latestBlock.number)
+    const receipts = await this.relayServer._worker(latestBlock)
     await assertRelayAdded(receipts, this.relayServer) // sanity check
-    await this.relayServer._worker(latestBlock.number + 1)
+    latestBlock = await this.ethersProvider.getBlock('latest')
+    await this.relayServer._worker(latestBlock)
   }
 
   _createKeyManager (workdir?: string): KeyManager {
@@ -208,7 +229,6 @@ export class ServerTestEnvironment {
 
   newServerInstanceNoFunding (config: Partial<ServerConfigParams> = {}, serverWorkdirs?: ServerWorkdirs): void {
     const shared: Partial<ServerConfigParams> = {
-      coldRestartLogsFromBlock: 1,
       runPaymasterReputations: false,
       ownerAddress: this.relayOwner,
       relayHubAddress: this.relayHub.address,
@@ -228,8 +248,10 @@ export class ServerTestEnvironment {
       const reputationStoreManager = new ReputationStoreManager({ inMemory: true }, logger)
       reputationManager = new ReputationManager(reputationStoreManager, logger, {})
     }
-    const serverDependencies = {
+
+    const serverDependencies: ServerDependencies = {
       contractInteractor: this.contractInteractor,
+      web3MethodsBuilder: this.web3MethodsBuilder,
       gasPriceFetcher,
       logger,
       txStoreManager,
@@ -249,18 +271,28 @@ export class ServerTestEnvironment {
     overrideDetails: Partial<GsnTransactionDetails> = {},
     overrideDeployment: GSNContractsDeployment = {}
   ): Promise<RelayTransactionRequest> {
-    const pingResponse = {
+    const pingResponse: PingResponse = {
+      maxAcceptanceBudget: '10000000',
+      maxMaxFeePerGas: '',
+      minMaxFeePerGas: '',
+      minMaxPriorityFeePerGas: '',
+      ownerAddress: '',
+      ready: false,
+      relayManagerAddress: '',
+      version: '',
       relayHubAddress: this.relayHub.address,
       relayWorkerAddress: this.relayServer.workerAddress
     }
-    const eventInfo: RelayRegisteredEventInfo = {
-      baseRelayFee: this.relayServer.config.baseRelayFee,
-      pctRelayFee: this.relayServer.config.pctRelayFee.toString(),
+    const eventInfo: RegistrarRelayInfo = {
+      firstSeenBlockNumber: toBN(0),
+      lastSeenBlockNumber: toBN(0),
+      firstSeenTimestamp: toBN(0),
+      lastSeenTimestamp: toBN(0),
       relayManager: '',
       relayUrl: ''
     }
     const relayInfo: RelayInfo = {
-      pingResponse: pingResponse as PingResponse,
+      pingResponse,
       relayInfo: eventInfo
     }
     const gsnTransactionDetails: GsnTransactionDetails = {
@@ -281,8 +313,10 @@ export class ServerTestEnvironment {
       // (will crash on 'let x = [createRelayHttpRequest(), createRelayHttpRequest()]')
       // eslint-disable-next-line @typescript-eslint/return-await,@typescript-eslint/promise-function-async
       return this.relayClient._prepareRelayRequest(mergedTransactionDetail).then(relayRequest => {
-        this.relayClient.fillRelayInfo(relayRequest, relayInfo)
-        return this.relayClient._prepareRelayHttpRequest(relayRequest, relayInfo)
+        return this.relayClient.fillRelayInfo(relayRequest, relayInfo).then(async () => {
+          // eslint-disable-next-line @typescript-eslint/return-await,@typescript-eslint/promise-function-async
+          return this.relayClient._prepareRelayHttpRequest(relayRequest, relayInfo)
+        })
       })
     } finally {
       sandbox.restore()
@@ -294,7 +328,7 @@ export class ServerTestEnvironment {
     txHash: PrefixedHexString
   }> {
     const req = await this.createRelayHttpRequest(overrideDetails)
-    const signedTx = await this.relayServer.createRelayTransaction(req)
+    const { signedTx } = await this.relayServer.createRelayTransaction(req)
     const txHash = ethUtils.bufferToHex(ethUtils.keccak256(Buffer.from(removeHexPrefix(signedTx), 'hex')))
 
     if (assertRelayed) {

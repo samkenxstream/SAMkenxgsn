@@ -39,6 +39,10 @@ interface IRelayHub is IERC165 {
         address devAddress;
         // 0 < fee < 100, as percentage of total charge from paymaster to relayer
         uint8 devFee;
+        // baseRelayFee The base fee the Relay Server charges for a single transaction in Ether, in wei.
+        uint80 baseRelayFee;
+        // pctRelayFee The percent of the total charge to add as a Relay Server fee to the total charge.
+        uint16 pctRelayFee;
     }
 
     /// @notice Emitted when a configuration of the `RelayHub` is changed
@@ -192,6 +196,7 @@ interface IRelayHub is IERC165 {
      *
      * @notice If all conditions are met, the call will be relayed and the `Paymaster` charged.
      *
+     * @param domainSeparatorName The name of the Domain Separator used to verify the EIP-712 signature
      * @param maxAcceptanceBudget The maximum valid value for `paymaster.getGasLimits().acceptanceBudget` to return.
      * @param relayRequest All details of the requested relayed call.
      * @param signature The client's EIP-712 signature over the `relayRequest` struct.
@@ -202,13 +207,19 @@ interface IRelayHub is IERC165 {
      * Emits a `TransactionRelayed` event regardless of whether the transaction succeeded or failed.
      */
     function relayCall(
+        string calldata domainSeparatorName,
         uint256 maxAcceptanceBudget,
         GsnTypes.RelayRequest calldata relayRequest,
         bytes calldata signature,
         bytes calldata approvalData
     )
     external
-    returns (bool paymasterAccepted, bytes memory returnValue);
+    returns (
+        bool paymasterAccepted,
+        uint256 charge,
+        IRelayHub.RelayCallStatus status,
+        bytes memory returnValue
+    );
 
     /**
      * @notice In case the Relay Worker has been found to be in violation of some rules by the `Penalizer` contract,

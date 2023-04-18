@@ -8,7 +8,7 @@ import {
 } from './GSNContractsDataTypes'
 import { PingResponse } from '../PingResponse'
 import { GSNContractsDeployment } from '../GSNContractsDeployment'
-import { EventData } from 'web3-eth-contract'
+type EventData = any
 
 export interface PingResult {
   pingResponse?: PingResponse
@@ -54,8 +54,6 @@ export interface StakeMangerEvents {
 
 export interface RelayServerRegistrationInfo {
   lastRegisteredUrl: string
-  lastRegisteredBaseFee: IntString
-  lastRegisteredPctFee: IntString
   pingResult: PingResult
   registeredWorkers: Address[]
   workerBalances: ObjectMap<IntString>

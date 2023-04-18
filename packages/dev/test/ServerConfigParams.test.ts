@@ -10,13 +10,14 @@ import {
 } from '@opengsn/relay/dist/ServerConfigParams'
 import * as fs from 'fs'
 import { expectRevert } from '@openzeppelin/test-helpers'
+
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
+
 import {
   RelayHubInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { constants } from '@opengsn/common/dist'
+import { constants } from '@opengsn/common'
 import { deployHub } from './TestUtils'
-
-require('source-map-support').install({ errorFormatterForce: true })
 
 function expectThrow (func: () => void, match: string): void {
   try {
@@ -114,10 +115,10 @@ context('#ServerConfigParams', () => {
     })
 
     it('should read param from file if no commandline or env', function () {
-      fs.writeFileSync(tmpConfigfile, '{"pctRelayFee":123, "baseRelayFee":234, "port":345}')
+      fs.writeFileSync(tmpConfigfile, '{"checkInterval":123, "alertedDelaySeconds":234, "port":345}')
       assert.deepEqual(
-        parseServerConfig(['--config', tmpConfigfile, '--port', '111'], { baseRelayFee: 222 }),
-        { baseRelayFee: 222, config: tmpConfigfile, pctRelayFee: 123, port: 111 })
+        parseServerConfig(['--config', tmpConfigfile, '--port', '111'], { alertedDelaySeconds: 222 }),
+        { alertedDelaySeconds: 222, config: tmpConfigfile, checkInterval: 123, port: 111 })
     })
 
     it('should parse numeric params', async function () {
@@ -163,19 +164,6 @@ context('#ServerConfigParams', () => {
         assert.include(e.message, 'managerTargetBalance must be at least managerMinBalance')
       }
     })
-    it('should throw if minHubWithdrawalBalance > withdrawToOwnerOnBalance', function () {
-      const config: ServerConfigParams = {
-        ...serverDefaultConfiguration,
-        withdrawToOwnerOnBalance: 1e18,
-        minHubWithdrawalBalance: 2e18
-      }
-      try {
-        validateBalanceParams(config)
-        assert.fail()
-      } catch (e: any) {
-        assert.include(e.message, 'withdrawToOwnerOnBalance must be at least minHubWithdrawalBalance')
-      }
-    })
     it('should throw if managerTargetBalance + workerTargetBalance > withdrawToOwnerOnBalance', function () {
       const config: ServerConfigParams = {
         ...serverDefaultConfiguration,
@@ -198,7 +186,6 @@ context('#ServerConfigParams', () => {
         ...serverDefaultConfiguration,
         managerTargetBalance: 1e18,
         workerTargetBalance: 1e18,
-        minHubWithdrawalBalance: 1e18,
         workerMinBalance: 0.5e18,
         managerMinBalance: 0.5e18
       }
@@ -209,15 +196,18 @@ context('#ServerConfigParams', () => {
   })
 
   context('#resolveServerConfig', () => {
-    const provider = web3.currentProvider
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    const provider = new StaticJsonRpcProvider(currentProviderHost)
     it('should fail on missing hub/oracle', async () => {
       await expectRevert(resolveServerConfig({}, provider), 'missing param: must have relayHubAddress')
     })
 
     it('should fail on invalid relayhub address', async () => {
+      // ethers.js considers invalid addresses to be ENS names
       const config = { relayHubAddress: '123' }
       await expectRevert(resolveServerConfig(config, provider),
-        'Provided address 123 is invalid, the capitalization checksum test failed, or it\'s an indirect IBAN address which can\'t be converted')
+        'network does not support ENS')
     })
 
     it('should fail on no-contract relayhub address', async () => {
@@ -245,6 +235,20 @@ context('#ServerConfigParams', () => {
       it('should fail on missing owner address', async () => {
         const config = { relayHubAddress: hub.address, url: 'fake.url.com', workdir: '/path/to/somewhere/' }
         await expectRevert(resolveServerConfig(config, provider), 'missing param: ownerAddress')
+      })
+
+      it('should fail on whitelisting paymaster or recipient addresses for public relay', async () => {
+        const fullConfig: Partial<ServerConfigParams> = {
+          relayHubAddress: hub.address,
+          url: 'fake.url.com',
+          workdir: '/path/to/somewhere/',
+          ownerAddress: constants.BURN_ADDRESS,
+          managerStakeTokenAddress: constants.BURN_ADDRESS
+        }
+        let config: Partial<ServerConfigParams> = { whitelistedPaymasters: ['something'], ...fullConfig }
+        await expectRevert(resolveServerConfig(config, provider), 'Cannot whitelist recipients or paymasters on a public Relay Server')
+        config = { whitelistedRecipients: ['something'], ...fullConfig }
+        await expectRevert(resolveServerConfig(config, provider), 'Cannot whitelist recipients or paymasters on a public Relay Server')
       })
 
       it('should fail on zero owner address', async () => {

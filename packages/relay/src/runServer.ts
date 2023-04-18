@@ -1,12 +1,21 @@
 // TODO: convert to 'commander' format
 import fs from 'fs'
 import Web3 from 'web3'
+import chalk from 'chalk'
 import { JsonRpcPayload, JsonRpcResponse } from 'web3-core-helpers'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { HttpServer } from './HttpServer'
 import { RelayServer } from './RelayServer'
 import { KeyManager } from './KeyManager'
 import { TXSTORE_FILENAME, TxStoreManager } from './TxStoreManager'
-import { ContractInteractor } from '@opengsn/common/dist/ContractInteractor'
+import {
+  ContractInteractor,
+  Environment,
+  EnvironmentsKeys,
+  VersionsManager,
+  gsnRequiredVersion,
+  gsnRuntimeVersion
+} from '@opengsn/common'
 import {
   LoggingProviderMode,
   parseServerConfig,
@@ -15,7 +24,7 @@ import {
   ServerConfigParams,
   ServerDependencies
 } from './ServerConfigParams'
-import { createServerLogger } from './ServerWinstonLogger'
+import { createServerLogger } from '@opengsn/logger/dist/ServerWinstonLogger'
 import { PenalizerDependencies, PenalizerService } from './penalizer/PenalizerService'
 import { TransactionManager } from './TransactionManager'
 import { EtherscanCachedService } from './penalizer/EtherscanCachedService'
@@ -23,7 +32,7 @@ import { TransactionDataCache, TX_PAGES_FILENAME, TX_STORE_FILENAME } from './pe
 import { GasPriceFetcher } from './GasPriceFetcher'
 import { ReputationManager, ReputationManagerConfiguration } from './ReputationManager'
 import { REPUTATION_STORE_FILENAME, ReputationStoreManager } from './ReputationStoreManager'
-import { Environment, EnvironmentsKeys, gsnRequiredVersion, gsnRuntimeVersion, VersionsManager } from '@opengsn/common'
+import { Web3MethodsBuilder } from './Web3MethodsBuilder'
 
 function error (err: string): never {
   console.error(err)
@@ -56,6 +65,7 @@ async function run (): Promise<void> {
   let config: ServerConfigParams
   let environment: Environment
   let web3provider
+  let ethersJsonRpcProvider: StaticJsonRpcProvider
   let runPenalizer: boolean
   let reputationManagerConfig: Partial<ReputationManagerConfiguration>
   let runPaymasterReputations: boolean
@@ -67,8 +77,10 @@ async function run (): Promise<void> {
       error('missing ethereumNodeUrl')
     }
     const loggingProvider: LoggingProviderMode = conf.loggingProvider ?? LoggingProviderMode.NONE
-    conf.environmentName = conf.environmentName ?? EnvironmentsKeys.ganacheLocal
+    conf.environmentName = conf.environmentName ?? EnvironmentsKeys.ethereumMainnet
     web3provider = new Web3.providers.HttpProvider(conf.ethereumNodeUrl)
+    ethersJsonRpcProvider = new StaticJsonRpcProvider(conf.ethereumNodeUrl)
+
     if (loggingProvider !== LoggingProviderMode.NONE) {
       const orig = web3provider
       web3provider = {
@@ -112,7 +124,7 @@ async function run (): Promise<void> {
       }
     }
     console.log('Resolving server config ...\n');
-    ({ config, environment } = await resolveServerConfig(conf, web3provider))
+    ({ config, environment } = await resolveServerConfig(conf, ethersJsonRpcProvider))
     runPenalizer = config.runPenalizer
     console.log('Resolving reputation manager config...\n')
     reputationManagerConfig = resolveReputationManagerConfig(conf)
@@ -140,12 +152,18 @@ async function run (): Promise<void> {
   console.log('Creating managers...\n')
   const managerKeyManager = new KeyManager(1, `${workdir}/manager`)
   const workersKeyManager = new KeyManager(1, `${workdir}/workers/${config.relayHubAddress}`)
-  const txStoreManager = new TxStoreManager({ workdir, autoCompactionInterval: config.dbAutoCompactionInterval }, logger)
+  const txStoreManager = new TxStoreManager({
+    workdir,
+    autoCompactionInterval: config.dbAutoCompactionInterval
+  }, logger)
+  console.log(chalk.redBright('Relay worker key manager created. This address is staked and meant only for internal (gsn) usage.' +
+    ' Using this address for any other purpose may result in loss of funds.'))
   console.log('Creating interactor...\n')
   const contractInteractor = new ContractInteractor({
-    provider: web3provider,
+    provider: ethersJsonRpcProvider,
     logger,
     environment,
+    calldataEstimationSlackFactor: config.calldataEstimationSlackFactor,
     maxPageSize: config.pastEventsQueryMaxPageSize,
     versionManager: new VersionsManager(gsnRuntimeVersion, config.requiredVersionRange ?? gsnRequiredVersion),
     deployment: {
@@ -155,6 +173,9 @@ async function run (): Promise<void> {
   })
   console.log('Initializing interactor...\n')
   await contractInteractor.init()
+  const resolvedDeployment = contractInteractor.getDeployment()
+  const web3MethodsBuilder = new Web3MethodsBuilder(new Web3(web3provider as any), resolvedDeployment)
+
   console.log('Creating gasPrice fetcher...\n')
   const gasPriceFetcher = new GasPriceFetcher(config.gasPriceOracleUrl, config.gasPriceOraclePath, contractInteractor, logger)
   let reputationManager: ReputationManager | undefined
@@ -171,6 +192,7 @@ async function run (): Promise<void> {
     managerKeyManager,
     workersKeyManager,
     contractInteractor,
+    web3MethodsBuilder,
     gasPriceFetcher
   }
   console.log('Creating Transaction Manager...\n')
@@ -186,6 +208,7 @@ async function run (): Promise<void> {
     const penalizerParams: PenalizerDependencies = {
       transactionManager,
       contractInteractor,
+      web3MethodsBuilder,
       txByNonceService
     }
     console.log('Running Penalizer: creating penalizer service...\n')

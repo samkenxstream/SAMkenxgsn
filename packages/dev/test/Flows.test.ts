@@ -3,10 +3,16 @@
 // the two modes must behave just the same (with an exception of gasless test, which must fail on direct mode, and must
 // succeed in gasless)
 // the entire 'contract' test is doubled. all tests titles are prefixed by either "Direct:" or "Relay:"
-import { HttpProvider } from 'web3-core'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 
 import { RelayProvider } from '@opengsn/provider/dist/RelayProvider'
-import { Address, AsyncDataCallback } from '@opengsn/common/dist/types/Aliases'
+import {
+  Address,
+  ApprovalDataCallback,
+  constants,
+  defaultEnvironment,
+  ether
+} from '@opengsn/common'
 import {
   RelayHubInstance, StakeManagerInstance,
   TestPaymasterEverythingAcceptedInstance, TestPaymasterPreconfiguredApprovalInstance,
@@ -14,10 +20,9 @@ import {
 } from '@opengsn/contracts/types/truffle-contracts'
 import { deployHub, emptyBalance, startRelay, stopRelay } from './TestUtils'
 import { ChildProcessWithoutNullStreams } from 'child_process'
-import { GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { constants, ether } from '@opengsn/common'
+import { defaultGsnConfig, GSNConfig } from '@opengsn/provider/dist/GSNConfigurator'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
+
 import Web3 from 'web3'
 
 const TestRecipient = artifacts.require('TestRecipient')
@@ -58,6 +63,9 @@ options.forEach(params => {
     let relayproc: ChildProcessWithoutNullStreams
     let relayClientConfig: Partial<GSNConfig>
     let relayProvider: RelayProvider
+    // @ts-ignore
+    const currentProviderHost = web3.currentProvider.host
+    const provider = new StaticJsonRpcProvider(currentProviderHost)
 
     before(async () => {
       await emptyBalance(gasless, accounts[0])
@@ -77,8 +85,6 @@ options.forEach(params => {
           stake,
           stakeTokenAddress: testToken.address,
           delay: 3600 * 24 * 7,
-          pctRelayFee: 12,
-          url: 'asd',
           relayOwner: accounts[0],
           // @ts-ignore
           ethereumNodeUrl: web3.currentProvider.host,
@@ -100,7 +106,7 @@ options.forEach(params => {
       TestRecipient.web3 = new Web3(web3.currentProvider.host)
       sr = await TestRecipient.new(forwarder.address)
 
-      await registerForwarderForGsn(forwarder)
+      await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarder)
 
       paymaster = await TestPaymasterEverythingAccepted.new()
       await paymaster.setTrustedForwarder(forwarder.address)
@@ -124,7 +130,7 @@ options.forEach(params => {
 
         relayProvider = await RelayProvider.newProvider(
           {
-            provider: web3.currentProvider as HttpProvider,
+            provider,
             config: relayClientConfig
           }).init()
 
@@ -197,7 +203,7 @@ options.forEach(params => {
         before(async function () {
           relayProvider = await RelayProvider.newProvider(
             {
-              provider: web3.currentProvider as HttpProvider,
+              provider,
               config: relayClientConfig
             }).init()
         });
@@ -231,17 +237,17 @@ options.forEach(params => {
           relayClientConfig = { ...relayClientConfig, ...{ paymasterAddress: approvalPaymaster.address }, performDryRunViewRelayCall: false }
           const relayProvider = await RelayProvider.newProvider(
             {
-              provider: web3.currentProvider as HttpProvider,
+              provider,
               config: relayClientConfig
             }).init()
           // @ts-ignore
           TestRecipient.web3.setProvider(relayProvider)
         })
 
-        const setRecipientProvider = async function (asyncApprovalData: AsyncDataCallback): Promise<void> {
+        const setRecipientProvider = async function (asyncApprovalData: ApprovalDataCallback): Promise<void> {
           const relayProvider =
             await RelayProvider.newProvider({
-              provider: web3.currentProvider as HttpProvider,
+              provider,
               config: relayClientConfig,
               overrideDependencies: { asyncApprovalData }
             }).init()

@@ -2,7 +2,8 @@
   "extends": "../../tsconfig.packages.json",
   "include": [
     "truffle.js",
-    "coverage-prov.js",
+    "deploy/deploy.ts",
+    "hardhat.config.ts",
     "../paymasters/test/**/*.ts"
   ]
 }

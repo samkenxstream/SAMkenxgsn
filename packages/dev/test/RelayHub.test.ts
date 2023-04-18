@@ -2,36 +2,46 @@ import { balance, ether, expectEvent, expectRevert } from '@openzeppelin/test-he
 import BN from 'bn.js'
 import chai from 'chai'
 import { toBN } from 'web3-utils'
-
-import { decodeRevertReason, getEip712Signature, removeHexPrefix } from '@opengsn/common/dist/Utils'
-import { RelayRequest, cloneRelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { TypedRequestData } from '@opengsn/common/dist/EIP712/TypedRequestData'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 
 import {
-  RelayHubInstance,
-  PenalizerInstance,
-  StakeManagerInstance,
-  TestRecipientInstance,
+  RelayCallStatusCodes,
+  RelayRequest,
+  TypedRequestData,
+  cloneRelayRequest,
+  constants,
+  decodeRevertReason,
+  defaultEnvironment,
+  getEip712Signature,
+  removeHexPrefix,
+  splitRelayUrlForRegistrar
+} from '@opengsn/common'
+
+import {
   ForwarderInstance,
-  TestPaymasterEverythingAcceptedInstance,
+  PenalizerInstance,
+  RelayHubInstance,
+  StakeManagerInstance,
+  TestGatewayForwarderInstance,
   TestPaymasterConfigurableMisbehaviorInstance,
-  GatewayForwarderInstance, TestTokenInstance
+  TestPaymasterEverythingAcceptedInstance,
+  TestPaymasterStoreContextInstance,
+  TestRecipientInstance,
+  TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { deployHub, encodeRevertReason, revert, snapshot } from './TestUtils'
-import { registerForwarderForGsn } from '@opengsn/common/dist/EIP712/ForwarderUtil'
+import { deployHub, encodeRevertReason, hardhatNodeChainId, revert, snapshot } from './TestUtils'
 
 import chaiAsPromised from 'chai-as-promised'
 import { RelayRegistrarInstance } from '@opengsn/contracts'
-import { constants, splitRelayUrlForRegistrar } from '@opengsn/common'
+import { defaultGsnConfig } from '@opengsn/provider'
+import { registerForwarderForGsn } from '@opengsn/cli/dist/ForwarderUtil'
 
 const { expect, assert } = chai.use(chaiAsPromised)
 
-const RelayHub = artifacts.require('RelayHub')
 const StakeManager = artifacts.require('StakeManager')
 const Forwarder = artifacts.require('Forwarder')
 const Penalizer = artifacts.require('Penalizer')
-const GatewayForwarder = artifacts.require('GatewayForwarder')
+const TestGatewayForwarder = artifacts.require('TestGatewayForwarder')
 const TestPaymasterEverythingAccepted = artifacts.require('TestPaymasterEverythingAccepted')
 const TestToken = artifacts.require('TestToken')
 const TestRelayHub = artifacts.require('TestRelayHub')
@@ -41,8 +51,6 @@ const TestPaymasterConfigurableMisbehavior = artifacts.require('TestPaymasterCon
 const RelayRegistrar = artifacts.require('RelayRegistrar')
 
 contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayWorker, senderAddress, other, dest, incorrectWorker]) { // eslint-disable-line no-unused-vars
-  const baseRelayFee = '10000'
-  const pctRelayFee = '10'
   const gasPrice = 1e9.toString()
   const maxFeePerGas = 1e9.toString()
   const maxPriorityFeePerGas = 1e9.toString()
@@ -52,18 +60,12 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
   const paymasterData = '0x'
   const clientId = '1'
 
-  const RelayCallStatusCodes = {
-    OK: new BN('0'),
-    RelayedCallFailed: new BN('1'),
-    RejectedByPreRelayed: new BN('2'),
-    RejectedByForwarder: new BN('3'),
-    RejectedByRecipientRevert: new BN('4'),
-    PostRelayedFailed: new BN('5'),
-    PaymasterBalanceChanged: new BN('6')
-  }
-
-  const chainId = defaultEnvironment.chainId
+  const chainId = hardhatNodeChainId
   const oneEther = ether('1')
+
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
 
   let relayHub: string
   let testToken: TestTokenInstance
@@ -100,7 +102,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
     recipientContract = await TestRecipient.new(forwarder)
 
     // register hub's RelayRequest with forwarder, if not already done.
-    await registerForwarderForGsn(forwarderInstance)
+    await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, forwarderInstance)
 
     target = recipientContract.address
     paymaster = paymasterContract.address
@@ -165,7 +167,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
       await testDeposit(other, paymaster, amount)
 
       const { tx } = await paymasterContract.withdrawRelayHubDepositTo(amount.divn(2), dest, { from: paymasterOwner })
-      await expectEvent.inTransaction(tx, RelayHub, 'Withdrawn', {
+      await expectEvent.inTransaction(tx, relayHubInstance, 'Withdrawn', {
         account: paymaster,
         dest,
         amount: amount.divn(2)
@@ -177,7 +179,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
       await testDeposit(other, paymaster, amount)
 
       const { tx } = await paymasterContract.withdrawRelayHubDepositTo(amount, dest, { from: paymasterOwner })
-      await expectEvent.inTransaction(tx, RelayHub, 'Withdrawn', {
+      await expectEvent.inTransaction(tx, relayHubInstance, 'Withdrawn', {
         account: paymaster,
         dest,
         amount
@@ -203,12 +205,12 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         { from: paymasterOwner })
       const balanceAfter = await testRelayHubInstance.balanceOf(paymasterOwner)
       assert.equal(balanceAfter.toString(), balanceBefore.sub(toBN(withdrawAmount1)).sub(toBN(withdrawAmount2)).toString())
-      await expectEvent.inTransaction(tx, RelayHub, 'Withdrawn', {
+      await expectEvent.inTransaction(tx, testRelayHubInstance, 'Withdrawn', {
         account: paymasterOwner,
         dest: other,
         amount: withdrawAmount1
       })
-      await expectEvent.inTransaction(tx, RelayHub, 'Withdrawn', {
+      await expectEvent.inTransaction(tx, testRelayHubInstance, 'Withdrawn', {
         account: paymasterOwner,
         dest: dest,
         amount: withdrawAmount2
@@ -244,8 +246,6 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           validUntilTime: '0'
         },
         relayData: {
-          pctRelayFee,
-          baseRelayFee,
           transactionCalldataGasUsed: 7e6.toString(),
           maxFeePerGas,
           maxPriorityFeePerGas,
@@ -275,7 +275,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
 
       it('should not accept a relay call', async function () {
         await expectRevert(
-          relayHubInstance.relayCall(10e6, relayRequest, signature, approvalData, {
+          relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signature, approvalData, {
             from: relayWorker,
             gas
           }),
@@ -414,16 +414,17 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         encodedFunction = recipientContract.contract.methods.emitMessage(message).encodeABI()
 
         await relayHubInstance.addRelayWorkers([relayWorker], { from: relayManager })
-        await relayRegistrar.registerRelayServer(relayHub, baseRelayFee, pctRelayFee, splitRelayUrlForRegistrar(url), { from: relayManager })
+        await relayRegistrar.registerRelayServer(relayHub, splitRelayUrlForRegistrar(url), { from: relayManager })
         relayRequest = cloneRelayRequest(sharedRelayRequestData)
         relayRequest.request.data = encodedFunction
         const dataToSign = new TypedRequestData(
+          defaultGsnConfig.domainSeparatorName,
           chainId,
           forwarder,
           relayRequest
         )
         signatureWithPermissivePaymaster = await getEip712Signature(
-          web3,
+          ethersProvider,
           dataToSign
         )
 
@@ -474,15 +475,14 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           function clearRelayRequest (relayRequest: RelayRequest): RelayRequest {
             const clone = cloneRelayRequest(relayRequest)
             clone.relayData.relayWorker = constants.ZERO_ADDRESS
-            clone.relayData.pctRelayFee = ''
-            clone.relayData.baseRelayFee = ''
-            clone.relayData.transactionCalldataGasUsed = ''
+            clone.relayData.transactionCalldataGasUsed = '0'
             return clone
           }
 
           it('should get \'paymasterAccepted = true\' and no revert reason as view call result of \'relayCall\' for a valid transaction', async function () {
             const clearedRelayRequest = clearRelayRequest(relayRequest)
             const relayCallView = await relayHubInstance.contract.methods.relayCall(
+              defaultGsnConfig.domainSeparatorName,
               10e6,
               clearedRelayRequest,
               '0x', '0x')
@@ -491,16 +491,16 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
                 gas: 7e6,
                 gasPrice: 1e9
               })
-            assert.equal(relayCallView.returnValue, null)
+            assert.equal(relayCallView.returnValue, web3.eth.abi.encodeParameter('string', 'emitMessage return value'))
             assert.equal(relayCallView.paymasterAccepted, true)
           })
 
           it('should return failure if forwarder rejects for incorrect nonce', async function () {
             const relayRequestWrongNonce = clearRelayRequest(relayRequest)
-            relayRequestWrongNonce.request.nonce = (parseInt(relayRequestWrongNonce.request.nonce) - 1).toString()
+            relayRequestWrongNonce.request.nonce = (parseInt(relayRequestWrongNonce.request.nonce) + 77).toString()
             const relayCallView =
               await relayHubInstance.contract.methods
-                .relayCall(10e6, relayRequestWrongNonce, '0x', '0x')
+                .relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestWrongNonce, '0x', '0x')
                 .call({ from: constants.DRY_RUN_ADDRESS, gas: 7e6, gasPrice: 1e9 })
 
             assert.equal(relayCallView.paymasterAccepted, false)
@@ -511,6 +511,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
 
         it('should get \'paymasterAccepted = true\' and no revert reason as view call result of \'relayCall\' for a valid transaction', async function () {
           const relayCallView = await relayHubInstance.contract.methods.relayCall(
+            defaultGsnConfig.domainSeparatorName,
             10e6,
             relayRequest,
             signatureWithPermissivePaymaster, '0x')
@@ -527,7 +528,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           await misbehavingPaymaster.setReturnInvalidErrorCode(true)
           const relayCallView =
             await relayHubInstance.contract.methods
-              .relayCall(10e6, relayRequestMisbehavingPaymaster, '0x00', '0x')
+              .relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster, '0x00', '0x')
               .call({ from: relayWorker, gas: 7e6, gasPrice: 1e9 })
 
           assert.equal(relayCallView.paymasterAccepted, false)
@@ -540,7 +541,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
       context('with funded paymaster', function () {
         let signature
 
-        let paymasterWithContext
+        let paymasterWithContext: TestPaymasterStoreContextInstance
         let misbehavingPaymaster: TestPaymasterConfigurableMisbehaviorInstance
 
         let relayRequestPaymasterWithContext: RelayRequest
@@ -566,13 +567,14 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
             from: other
           })
           let dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             forwarder,
             relayRequest
           )
 
           signature = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
 
@@ -580,30 +582,32 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           relayRequestMisbehavingPaymaster.relayData.paymaster = misbehavingPaymaster.address
 
           dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             forwarder,
             relayRequestMisbehavingPaymaster
           )
           signatureWithMisbehavingPaymaster = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
 
           relayRequestPaymasterWithContext = cloneRelayRequest(relayRequest)
           relayRequestPaymasterWithContext.relayData.paymaster = paymasterWithContext.address
           dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             forwarder,
             relayRequestPaymasterWithContext
           )
           signatureWithContextPaymaster = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
         })
 
         it('should revert if encoded function contains extra bytes', async () => {
-          const encoded = await relayHubInstance.contract.methods.relayCall(10e6, relayRequest, signatureWithPermissivePaymaster, '0x').encodeABI() as string
+          const encoded = await relayHubInstance.contract.methods.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signatureWithPermissivePaymaster, '0x').encodeABI() as string
           await expectRevert(web3.eth.call({
             data: encoded + '1234',
             from: relayWorker,
@@ -619,7 +623,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           const {
             tx,
             logs
-          } = await relayHubInstance.relayCall(10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
+          } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
             from: relayWorker,
             gas,
             gasPrice
@@ -627,7 +631,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           const nonceAfter = await forwarderInstance.getNonce(senderAddress)
           assert.equal(nonceBefore.addn(1).toNumber(), nonceAfter.toNumber())
 
-          await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted', {
+          await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted', {
             message,
             realSender: senderAddress,
             msgSender: forwarder,
@@ -651,18 +655,19 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           eip1559relayRequest.relayData.maxPriorityFeePerGas = 1e9.toString()
           const gasPrice = 1e10.toString()
           const dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             eip1559relayRequest.relayData.forwarder,
             eip1559relayRequest
           )
           const signature = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
           const {
             tx,
             logs
-          } = await relayHubInstance.relayCall(10e6, eip1559relayRequest, signature, '0x', {
+          } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, eip1559relayRequest, signature, '0x', {
             from: relayWorker,
             gas,
             gasPrice
@@ -670,7 +675,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           const nonceAfter = await forwarderInstance.getNonce(senderAddress)
           assert.equal(nonceBefore.addn(1).toNumber(), nonceAfter.toNumber())
 
-          await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted', {
+          await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted', {
             message,
             realSender: senderAddress,
             msgSender: forwarder,
@@ -688,14 +693,14 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         })
 
         it('relayCall should refuse to re-send transaction with same nonce', async function () {
-          const { tx } = await relayHubInstance.relayCall(10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
+          const { tx } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
             from: relayWorker,
             gas,
             gasPrice
           })
-          await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted')
+          await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted')
 
-          const ret = await relayHubInstance.relayCall(10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
+          const ret = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
             from: relayWorker,
             gas,
             gasPrice
@@ -709,20 +714,21 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           const relayRequestNoCallData = cloneRelayRequest(relayRequest)
           relayRequestNoCallData.request.data = encodedFunction
           const dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             forwarder,
             relayRequestNoCallData
           )
           signature = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
-          const { tx } = await relayHubInstance.relayCall(10e6, relayRequestNoCallData, signature, '0x', {
+          const { tx } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestNoCallData, signature, '0x', {
             from: relayWorker,
             gas,
             gasPrice
           })
-          await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted', {
+          await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted', {
             message: messageWithNoParams,
             realSender: senderAddress,
             msgSender: forwarder,
@@ -735,15 +741,16 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           const relayRequestRevert = cloneRelayRequest(relayRequest)
           relayRequestRevert.request.data = encodedFunction
           const dataToSign = new TypedRequestData(
+            defaultGsnConfig.domainSeparatorName,
             chainId,
             forwarder,
             relayRequestRevert
           )
           signature = await getEip712Signature(
-            web3,
+            ethersProvider,
             dataToSign
           )
-          const { logs } = await relayHubInstance.relayCall(10e6, relayRequestRevert, signature, '0x', {
+          const { logs } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestRevert, signature, '0x', {
             from: relayWorker,
             gas,
             gasPrice
@@ -760,21 +767,21 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         })
 
         it('postRelayedCall receives values returned in preRelayedCall', async function () {
-          const { tx } = await relayHubInstance.relayCall(10e6, relayRequestPaymasterWithContext,
+          const { tx } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestPaymasterWithContext,
             signatureWithContextPaymaster, '0x', {
               from: relayWorker,
               gas,
               gasPrice
             })
 
-          await expectEvent.inTransaction(tx, TestPaymasterStoreContext, 'SampleRecipientPostCallWithValues', {
+          await expectEvent.inTransaction(tx, paymasterWithContext, 'SampleRecipientPostCallWithValues', {
             context: 'context passed from preRelayedCall to postRelayedCall'
           })
         })
 
         it('relaying is aborted if the paymaster reverts the preRelayedCall', async function () {
           await misbehavingPaymaster.setReturnInvalidErrorCode(true)
-          const { logs } = await relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster,
+          const { logs } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster,
             signatureWithMisbehavingPaymaster, '0x', {
               from: relayWorker,
               gas,
@@ -787,7 +794,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         it('should revert with out-of-gas if gas limit is too low for a relayed transaction', async function () {
           const gas = '200000' // not enough for a 'relayCall' transaction
           await expectRevert(
-            relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster, signatureWithMisbehavingPaymaster, '0x', {
+            relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster, signatureWithMisbehavingPaymaster, '0x', {
               from: relayWorker,
               gasPrice,
               gas: gas
@@ -798,7 +805,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         it('should not accept relay requests with incorrect relay worker', async function () {
           await relayHubInstance.addRelayWorkers([incorrectWorker], { from: relayManager })
           await expectRevert(
-            relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster, signatureWithMisbehavingPaymaster, '0x', {
+            relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster, signatureWithMisbehavingPaymaster, '0x', {
               from: incorrectWorker,
               gasPrice,
               gas
@@ -814,8 +821,6 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
             const maxPossibleCharge = (await relayHubInstance.calculateCharge(gasLimit, {
               maxFeePerGas,
               maxPriorityFeePerGas,
-              pctRelayFee,
-              baseRelayFee,
               transactionCalldataGasUsed: 7e6.toString(),
               relayWorker,
               forwarder,
@@ -823,13 +828,14 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
               paymasterData: '0x',
               clientId: '1'
             })).toNumber()
-            await paymaster2.deposit({ value: (maxPossibleCharge - 1).toString() }) // TODO: replace with correct margin calculation
+            const value = (maxPossibleCharge - 1).toString()
+            await paymaster2.deposit({ value }) // TODO: replace with correct margin calculation
 
             const relayRequestPaymaster2 = cloneRelayRequest(relayRequest)
             relayRequestPaymaster2.relayData.paymaster = paymaster2.address
 
             await expectRevert(
-              relayHubInstance.relayCall(10e6, relayRequestPaymaster2, signatureWithMisbehavingPaymaster, '0x', {
+              relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestPaymaster2, signatureWithMisbehavingPaymaster, '0x', {
                 from: relayWorker,
                 gas,
                 gasPrice
@@ -842,7 +848,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           // @ts-ignore (there is a problem with web3 types annotations that must be solved)
           const startBlock = await web3.eth.getBlockNumber()
 
-          const { logs } = await relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster,
+          const { logs } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster,
             signatureWithMisbehavingPaymaster, '0x', {
               from: relayWorker,
               gas,
@@ -864,7 +870,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         it('should fail a transaction if paymaster.getGasAndDataLimits is too expensive', async function () {
           await misbehavingPaymaster.setExpensiveGasLimits(true)
 
-          await expectRevert(relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster,
+          await expectRevert(relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster,
             signatureWithMisbehavingPaymaster, '0x', {
               from: relayWorker,
               gas,
@@ -874,7 +880,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
 
         it('should revert the \'relayedCall\' if \'postRelayedCall\' reverts', async function () {
           await misbehavingPaymaster.setRevertPostRelayCall(true)
-          const { logs } = await relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster,
+          const { logs } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster,
             signatureWithMisbehavingPaymaster, '0x', {
               from: relayWorker,
               gas,
@@ -908,12 +914,13 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
             relayRequestMisbehavingPaymaster = cloneRelayRequest(relayRequest)
             relayRequestMisbehavingPaymaster.relayData.paymaster = misbehavingPaymaster.address
             const dataToSign = new TypedRequestData(
+              defaultGsnConfig.domainSeparatorName,
               chainId,
               forwarder,
               relayRequestMisbehavingPaymaster
             )
             signature = await getEip712Signature(
-              web3,
+              ethersProvider,
               dataToSign
             )
           })
@@ -934,7 +941,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           })
 
           async function assertRevertWithPaymasterBalanceChanged (): Promise<void> {
-            const { logs } = await relayHubInstance.relayCall(10e6, relayRequestMisbehavingPaymaster, signature, '0x', {
+            const { logs } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestMisbehavingPaymaster, signature, '0x', {
               from: relayWorker,
               gas,
               gasPrice
@@ -945,15 +952,15 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
         context('with BatchGateway configured', function () {
           const batchGateway = other
 
-          let gatewayForwarder: GatewayForwarderInstance
+          let gatewayForwarder: TestGatewayForwarderInstance
           let relayHubInstance: RelayHubInstance
           let recipientContract: TestRecipientInstance
           let relayRequest: RelayRequest
 
           before(async function () {
             relayRequest = cloneRelayRequest(sharedRelayRequestData)
-            gatewayForwarder = await GatewayForwarder.new()
-            await registerForwarderForGsn(gatewayForwarder)
+            gatewayForwarder = await TestGatewayForwarder.new()
+            await registerForwarderForGsn(defaultGsnConfig.domainSeparatorName, gatewayForwarder)
             relayHubInstance = await deployHub(stakeManager.address, penalizer.address, batchGateway, testToken.address, oneEther.toString())
             recipientContract = await TestRecipient.new(gatewayForwarder.address)
             await gatewayForwarder.setTrustedRelayHub(relayHubInstance.address)
@@ -979,7 +986,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
           it('should reject relayCall with incorrect non-empty signature coming from the BatchGateway', async function () {
             const {
               logs
-            } = await relayHubInstance.relayCall(10e6, relayRequest, '0xdeadbeef', '0x', {
+            } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, '0xdeadbeef', '0x', {
               from: batchGateway,
               gas
             })
@@ -991,28 +998,29 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
 
           it('should relay relayCall with correct non-empty signature coming from the BatchGateway', async function () {
             const dataToSign = new TypedRequestData(
+              defaultGsnConfig.domainSeparatorName,
               chainId,
               gatewayForwarder.address,
               relayRequest
             )
             signatureWithPermissivePaymaster = await getEip712Signature(
-              web3,
+              ethersProvider,
               dataToSign
             )
             const {
               tx
-            } = await relayHubInstance.relayCall(10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
+            } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, signatureWithPermissivePaymaster, '0x', {
               from: batchGateway,
               gas
             })
-            await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted', {
+            await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted', {
               message: 'Method with no parameters'
             })
           })
 
           it('should reject relayCall with empty signature coming from a valid worker', async function () {
             await expectRevert(
-              relayHubInstance.relayCall(10e6, relayRequest, '0x', '0x', {
+              relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequest, '0x', '0x', {
                 from: relayWorker,
                 gas
               }),
@@ -1023,7 +1031,7 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
             const relayRequestWithInvalidWorker = cloneRelayRequest(relayRequest)
             relayRequestWithInvalidWorker.relayData.relayWorker = incorrectWorker
             await expectRevert(
-              relayHubInstance.relayCall(10e6, relayRequestWithInvalidWorker, signatureWithPermissivePaymaster, '0x', {
+              relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestWithInvalidWorker, signatureWithPermissivePaymaster, '0x', {
                 from: batchGateway,
                 gas
               }),
@@ -1034,21 +1042,22 @@ contract('RelayHub', function ([paymasterOwner, relayOwner, relayManager, relayW
             const relayRequestWithNonce = cloneRelayRequest(relayRequest)
             relayRequestWithNonce.request.nonce = (await gatewayForwarder.getNonce(relayRequest.request.from)).toString()
             const dataToSign = new TypedRequestData(
+              defaultGsnConfig.domainSeparatorName,
               chainId,
               gatewayForwarder.address,
               relayRequestWithNonce
             )
             signatureWithPermissivePaymaster = await getEip712Signature(
-              web3,
+              ethersProvider,
               dataToSign
             )
             const {
               tx
-            } = await relayHubInstance.relayCall(10e6, relayRequestWithNonce, '0x', '0x', {
+            } = await relayHubInstance.relayCall(defaultGsnConfig.domainSeparatorName, 10e6, relayRequestWithNonce, '0x', '0x', {
               from: batchGateway,
               gas
             })
-            await expectEvent.inTransaction(tx, TestRecipient, 'SampleRecipientEmitted', {
+            await expectEvent.inTransaction(tx, recipientContract, 'SampleRecipientEmitted', {
               message: 'Method with no parameters',
               realSender: senderAddress,
               msgSender: gatewayForwarder.address,

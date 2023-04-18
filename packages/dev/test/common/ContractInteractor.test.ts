@@ -2,36 +2,48 @@ import chai from 'chai'
 import chaiAsPromised from 'chai-as-promised'
 import sinon from 'sinon'
 import BN from 'bn.js'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
+import { BigNumber } from '@ethersproject/bignumber'
 import { PastEventOptions } from 'web3-eth-contract'
 import {
+  ForwarderInstance,
   PenalizerInstance,
   RelayHubInstance,
   StakeManagerInstance,
+  TestDecimalsTokenInstance,
   TestPaymasterConfigurableMisbehaviorInstance,
-  TestTokenInstance,
-  TestDecimalsTokenInstance, TestRelayHubForRegistrarInstance
+  TestRelayHubForRegistrarInstance,
+  TestTokenInstance
 } from '@opengsn/contracts/types/truffle-contracts'
-import { HttpProvider } from 'web3-core'
 import { ProfilingProvider } from '@opengsn/common/dist/dev/ProfilingProvider'
-import { ContractInteractor, RelayCallABI } from '@opengsn/common/dist/ContractInteractor'
+import {
+  ContractInteractor,
+  EventName,
+  GSNContractsDeployment,
+  GsnTransactionDetails,
+  RelayCallABI,
+  RelayRequest,
+  TransactionType,
+  VersionsManager,
+  constants,
+  defaultEnvironment,
+  gsnRequiredVersion,
+  gsnRuntimeVersion,
+  splitRelayUrlForRegistrar, environments
+} from '@opengsn/common'
 import { PrefixedHexString } from 'ethereumjs-util'
 import { Transaction } from '@ethereumjs/tx'
-import { constants } from '@opengsn/common/dist/Constants'
-import { createClientLogger } from '@opengsn/provider/dist/ClientWinstonLogger'
-import { RelayRequest } from '@opengsn/common/dist/EIP712/RelayRequest'
+
+import { createClientLogger } from '@opengsn/logger/dist/ClientWinstonLogger'
+
 import { deployHub } from '../TestUtils'
-import { VersionsManager } from '@opengsn/common/dist/VersionsManager'
-import { gsnRequiredVersion, gsnRuntimeVersion } from '@opengsn/common/dist/Version'
-import { GSNContractsDeployment } from '@opengsn/common/dist/GSNContractsDeployment'
-import { defaultEnvironment } from '@opengsn/common/dist/Environments'
-import { EventName } from '@opengsn/common/dist/types/Aliases'
-import { GsnTransactionDetails } from '@opengsn/common/dist/types/GsnTransactionDetails'
+
 import { toHex } from 'web3-utils'
 import { IRelayRegistrarInstance } from '../../../contracts/types/truffle-contracts'
 import { RelayRegistrarInstance } from '@opengsn/contracts'
-import { TransactionType } from '@opengsn/common/dist/types/TransactionType'
+
 import { ether } from '@openzeppelin/test-helpers'
-import { splitRelayUrlForRegistrar } from '@opengsn/common'
+import { defaultGsnConfig } from '@opengsn/provider'
 
 const { expect } = chai.use(chaiAsPromised)
 
@@ -48,7 +60,11 @@ const RelayRegistrar = artifacts.require('RelayRegistrar')
 const environment = defaultEnvironment
 
 contract('ContractInteractor', function (accounts) {
-  const provider = new ProfilingProvider(web3.currentProvider as HttpProvider)
+  // @ts-ignore
+  const currentProviderHost = web3.currentProvider.host
+  const ethersProvider = new StaticJsonRpcProvider(currentProviderHost)
+
+  const provider = new ProfilingProvider(currentProviderHost)
   const logger = createClientLogger({ logLevel: 'error' })
   const workerAddress = accounts[2]
   const maxPageSize = Number.MAX_SAFE_INTEGER
@@ -59,6 +75,7 @@ contract('ContractInteractor', function (accounts) {
   let pen: PenalizerInstance
   let tt: TestTokenInstance
   let pm: TestPaymasterConfigurableMisbehaviorInstance
+  let fw: ForwarderInstance
 
   before(async () => {
     tt = await TestToken.new()
@@ -67,8 +84,10 @@ contract('ContractInteractor', function (accounts) {
       defaultEnvironment.penalizerConfiguration.penalizeBlockDelay,
       defaultEnvironment.penalizerConfiguration.penalizeBlockExpiration)
     rh = await deployHub(sm.address, pen.address, constants.ZERO_ADDRESS, tt.address, stake.toString())
+    fw = await Forwarder.new()
     pm = await TestPaymasterConfigurableMisbehavior.new()
     await pm.setRelayHub(rh.address)
+    await pm.setTrustedForwarder(fw.address)
     const mgrAddress = accounts[1]
 
     await tt.mint(stake)
@@ -88,12 +107,12 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
         })
-      const stub = sinon.stub(contractInteractor.web3.eth, 'getBlock').rejects(new Error('No block number for you'))
+      const stub = sinon.stub(contractInteractor.provider, 'getBlock').rejects(new Error('No block number for you'))
       try {
         await expect(contractInteractor.init())
           .to.eventually.rejectedWith('No block number for you')
@@ -105,7 +124,7 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
@@ -127,12 +146,34 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
         })
-      await contractInteractor.init().catch((e: Error) => { assert.equal(e.message, 'init was already called') })
+      await contractInteractor.init()
+      await expect(contractInteractor.init()).to.be.rejectedWith('init was already called')
+    })
+    it('should fall back to Legacy Type if network returns block.baseFeePerGas but rpc node doesn\'t support eth_feeHistory', async function () {
+      const contractInteractor = new ContractInteractor(
+        {
+          environment,
+          provider: ethersProvider,
+          logger,
+          maxPageSize,
+          deployment: { paymasterAddress: pm.address }
+        })
+      const stub = sinon.stub(contractInteractor, 'getFeeHistory').rejects(new Error('No fee history for you'))
+      // @ts-ignore
+      const spy = sinon.spy(contractInteractor.logger, 'warn')
+      try {
+        await contractInteractor.init()
+        const transactionType = contractInteractor.transactionType
+        assert.equal(transactionType, TransactionType.LEGACY)
+        sinon.assert.calledWith(spy, 'Call to \'eth_feeHistory\' failed. Falling back to Legacy Transaction Type.')
+      } finally {
+        stub.restore()
+      }
     })
   })
 
@@ -154,8 +195,6 @@ contract('ContractInteractor', function (accounts) {
         relayData: {
           maxFeePerGas: '11',
           maxPriorityFeePerGas: '1',
-          pctRelayFee: '0',
-          baseRelayFee: '0',
           transactionCalldataGasUsed: '0',
           relayWorker: workerAddress,
           forwarder: constants.ZERO_ADDRESS,
@@ -165,6 +204,7 @@ contract('ContractInteractor', function (accounts) {
         }
       }
       encodedData = {
+        domainSeparatorName: defaultGsnConfig.domainSeparatorName,
         maxAcceptanceBudget: '200000',
         relayRequest,
         signature: '0xdeadbeef',
@@ -176,19 +216,20 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           versionManager,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
         })
       await contractInteractor.init()
-      const blockGasLimit = await contractInteractor._getBlockGasLimit()
+      const blockGasLimit = await contractInteractor.getBlockGasLimit()
       const ret = await contractInteractor.validateRelayCall(encodedData, new BN(blockGasLimit), false)
       assert.deepEqual(ret, {
         paymasterAccepted: false,
         returnValue: 'view call to \'relayCall\' reverted in client: Paymaster balance too low',
-        reverted: true
+        relayHubReverted: true,
+        recipientReverted: false
       })
     })
 
@@ -202,7 +243,7 @@ contract('ContractInteractor', function (accounts) {
       await pm.setTrustedForwarder(forwarder.address)
       const contractInteractor = new ContractInteractor({
         environment,
-        provider: web3.currentProvider as HttpProvider,
+        provider: ethersProvider,
         versionManager,
         logger,
         maxPageSize: Number.MAX_SAFE_INTEGER,
@@ -223,8 +264,6 @@ contract('ContractInteractor', function (accounts) {
         relayData: {
           maxFeePerGas: '1',
           maxPriorityFeePerGas: '1',
-          pctRelayFee: '0',
-          baseRelayFee: '0',
           transactionCalldataGasUsed: '0',
           relayWorker: workerAddress,
           forwarder: forwarder.address,
@@ -233,8 +272,9 @@ contract('ContractInteractor', function (accounts) {
           clientId: '1'
         }
       }
-      const blockGasLimit = await contractInteractor._getBlockGasLimit()
+      const blockGasLimit = await contractInteractor.getBlockGasLimit()
       const encodedData: RelayCallABI = {
+        domainSeparatorName: defaultGsnConfig.domainSeparatorName,
         maxAcceptanceBudget: '200000',
         relayRequest,
         signature: '0xdeadbeef',
@@ -244,7 +284,8 @@ contract('ContractInteractor', function (accounts) {
       assert.deepEqual(ret, {
         paymasterAccepted: false,
         returnValue: 'You asked me to revert, remember?',
-        reverted: false
+        relayHubReverted: false,
+        recipientReverted: false
       })
     })
 
@@ -252,24 +293,25 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           versionManager,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
         })
       await contractInteractor.init()
-      const blockGasLimit = await contractInteractor._getBlockGasLimit()
-      const spy = sinon.spy(contractInteractor.web3.currentProvider as HttpProvider, 'send')
+      const blockGasLimit = await contractInteractor.getBlockGasLimit()
+      const spy = sinon.spy(contractInteractor.provider, 'send')
       try {
         contractInteractor.transactionType = TransactionType.LEGACY
         await contractInteractor.validateRelayCall(encodedData, new BN(blockGasLimit), false)
       } finally {
         sinon.assert.calledOnce(spy)
-        const rpcPayload = spy.getCall(0).args[0]
-        assert.equal(rpcPayload.method, 'eth_call')
+        const method = spy.getCall(0).args[0]
+        const params = spy.getCall(0).args[1]
+        assert.equal(method, 'eth_call')
         // @ts-ignore
-        assert.equal(rpcPayload.params[0].gasPrice, toHex(relayRequest.relayData.maxFeePerGas))
+        assert.equal(params[0].gasPrice, toHex(relayRequest.relayData.maxFeePerGas))
         spy.restore()
       }
     })
@@ -278,23 +320,24 @@ contract('ContractInteractor', function (accounts) {
       const contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           versionManager,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
         })
       await contractInteractor.init()
-      const blockGasLimit = await contractInteractor._getBlockGasLimit()
-      const spy = sinon.spy(contractInteractor.web3.currentProvider as HttpProvider, 'send')
+      const blockGasLimit = await contractInteractor.getBlockGasLimit()
+      const spy = sinon.spy(contractInteractor.provider, 'send')
       try {
         await contractInteractor.validateRelayCall(encodedData, new BN(blockGasLimit), false)
       } finally {
         sinon.assert.calledOnce(spy)
-        const rpcPayload = spy.getCall(0).args[0]
-        assert.equal(rpcPayload.method, 'eth_call')
-        assert.equal(rpcPayload.params![0].maxFeePerGas, toHex(relayRequest.relayData.maxFeePerGas))
-        assert.equal(rpcPayload.params![0].maxPriorityFeePerGas, toHex(relayRequest.relayData.maxPriorityFeePerGas))
+        const method = spy.getCall(0).args[0]
+        const params = spy.getCall(0).args[1]
+        assert.equal(method, 'eth_call')
+        assert.equal(params[0].maxFeePerGas, toHex(relayRequest.relayData.maxFeePerGas))
+        assert.equal(params[0].maxPriorityFeePerGas, toHex(relayRequest.relayData.maxPriorityFeePerGas))
         spy.restore()
       }
     })
@@ -304,7 +347,7 @@ contract('ContractInteractor', function (accounts) {
         const contractInteractor = new ContractInteractor(
           {
             environment,
-            provider: web3.currentProvider as HttpProvider,
+            provider: ethersProvider,
             logger,
             maxPageSize,
             deployment: { paymasterAddress: pm.address }
@@ -355,7 +398,13 @@ contract('ContractInteractor', function (accounts) {
       const deployment: GSNContractsDeployment = {
         paymasterAddress: pm.address
       }
-      const contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+      const contractInteractor = new ContractInteractor({
+        provider: ethersProvider,
+        logger,
+        deployment,
+        maxPageSize,
+        environment
+      })
       await contractInteractor._resolveDeployment()
       const deploymentOut = contractInteractor.getDeployment()
       assert.equal(deploymentOut.paymasterAddress, pm.address)
@@ -368,7 +417,13 @@ contract('ContractInteractor', function (accounts) {
       const deployment: GSNContractsDeployment = {
         paymasterAddress: constants.ZERO_ADDRESS
       }
-      const contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+      const contractInteractor = new ContractInteractor({
+        provider: ethersProvider,
+        logger,
+        deployment,
+        maxPageSize,
+        environment
+      })
       await expect(contractInteractor._resolveDeployment())
         .to.eventually.rejectedWith('Not a paymaster contract')
     })
@@ -377,7 +432,13 @@ contract('ContractInteractor', function (accounts) {
       const deployment: GSNContractsDeployment = {
         paymasterAddress: sm.address
       }
-      const contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+      const contractInteractor = new ContractInteractor({
+        provider: ethersProvider,
+        logger,
+        deployment,
+        maxPageSize,
+        environment
+      })
       await expect(contractInteractor._resolveDeployment())
         .to.eventually.rejectedWith('Not a paymaster contract')
     })
@@ -388,7 +449,7 @@ contract('ContractInteractor', function (accounts) {
       }
       const versionManager = new VersionsManager('1.0.0', '1.0.0-old-client')
       const contractInteractor = new ContractInteractor({
-        provider,
+        provider: ethersProvider,
         logger,
         versionManager,
         deployment,
@@ -402,7 +463,13 @@ contract('ContractInteractor', function (accounts) {
     describe('#_validateERC165Interfaces()', function () {
       it('should fail verification of ERC-165 interfaces if no contract instance is initialized', async function () {
         const deployment = {}
-        const contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+        const contractInteractor = new ContractInteractor({
+          provider: ethersProvider,
+          logger,
+          deployment,
+          maxPageSize,
+          environment
+        })
         await contractInteractor.init()
         await expect(contractInteractor._validateERC165InterfacesRelay())
           .to.eventually.be.rejectedWith('ERC-165 interface check failed. Penalizer instance is not initialized')
@@ -422,14 +489,26 @@ contract('ContractInteractor', function (accounts) {
           relayRegistrarAddress: constants.BURN_ADDRESS,
           stakeManagerAddress: sm.address
         }
-        let contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+        let contractInteractor = new ContractInteractor({
+          provider: ethersProvider,
+          logger,
+          deployment,
+          maxPageSize,
+          environment
+        })
         await contractInteractor.init()
         await expect(contractInteractor._validateERC165InterfacesRelay())
           .to.eventually.be.rejectedWith(new RegExp(`Failed call to RelayRegistrar supportsInterface at address: ${constants.BURN_ADDRESS}`))
 
         // incorrect contract at address
         deployment.relayRegistrarAddress = sm.address
-        contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+        contractInteractor = new ContractInteractor({
+          provider: ethersProvider,
+          logger,
+          deployment,
+          maxPageSize,
+          environment
+        })
         await contractInteractor.init()
         await expect(contractInteractor._validateERC165InterfacesRelay())
           .to.eventually.be.rejectedWith('ERC-165 interface check failed. PN: true RR: false RH: true SM: true')
@@ -437,7 +516,13 @@ contract('ContractInteractor', function (accounts) {
         // all contracts correct
         const rr = await RelayRegistrar.new(constants.yearInSec)
         deployment.relayRegistrarAddress = rr.address
-        contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+        contractInteractor = new ContractInteractor({
+          provider: ethersProvider,
+          logger,
+          deployment,
+          maxPageSize,
+          environment
+        })
         await contractInteractor.init()
         await contractInteractor._validateERC165InterfacesRelay()
       })
@@ -445,7 +530,7 @@ contract('ContractInteractor', function (accounts) {
   })
 
   describe('#splitRange', () => {
-    const contractInteractor = new ContractInteractor({ provider, logger, maxPageSize, environment })
+    const contractInteractor = new ContractInteractor({ provider: ethersProvider, logger, maxPageSize, environment })
     it('split 1', () => {
       assert.deepEqual(contractInteractor.splitRange(1, 6, 1),
         [{ fromBlock: 1, toBlock: 6 }])
@@ -478,48 +563,56 @@ contract('ContractInteractor', function (accounts) {
   context('#formatTokenAmount()', function () {
     let contractInteractor: ContractInteractor
     let testDecimalsToken: TestDecimalsTokenInstance
+    let shortTokenAddress: string
     before(async function () {
       testDecimalsToken = await TestDecimalsToken.new()
+      shortTokenAddress = `${testDecimalsToken.address.substring(0, 6)}...${testDecimalsToken.address.substring(39)}`
       await testDecimalsToken.mint('123456789123456789123', { from: accounts[1] })
       const deployment: GSNContractsDeployment = { managerStakeTokenAddress: testDecimalsToken.address }
-      contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+      contractInteractor = new ContractInteractor({
+        provider: ethersProvider,
+        logger,
+        deployment,
+        maxPageSize,
+        environment
+      })
       await contractInteractor.init()
     })
 
     it('should display amount correctly with 24 decimals', async function () {
       await testDecimalsToken.setDecimals(24)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[1])
-      assert.equal(balanceFormatted, '0.000123456789123456 DEC')
+      assert.equal(balanceFormatted, `0.000123456789123456 DEC (${shortTokenAddress})`)
     })
 
     it('should display amount correctly with 18 decimals', async function () {
       await testDecimalsToken.setDecimals(18)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[1])
-      assert.equal(balanceFormatted, '123.456789123456789123 DEC')
+      assert.equal(balanceFormatted, `123.456789123456789123 DEC (${shortTokenAddress})`)
     })
 
     it('should display amount correctly with 18 decimals but 0 total balance', async function () {
       await testDecimalsToken.setDecimals(18)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[3])
-      assert.equal(balanceFormatted, '0 DEC')
+      assert.equal(balanceFormatted, `0 DEC (${shortTokenAddress})`)
     })
 
     it('should display amount correctly with 6 decimals', async function () {
       await testDecimalsToken.setDecimals(6)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[1])
-      assert.equal(balanceFormatted, '123456789123456.789123 DEC')
+      assert.equal(balanceFormatted, `123456789123456.789123 DEC (${shortTokenAddress})`)
     })
 
     it('should display amount correctly with 2 decimals', async function () {
       await testDecimalsToken.setDecimals(2)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[1])
-      assert.equal(balanceFormatted, '1234567891234567891.23 DEC')
+      assert.equal(balanceFormatted, `1234567891234567891.23 DEC (${shortTokenAddress})`)
     })
 
     it('should display amount correctly with 0 decimals', async function () {
       await testDecimalsToken.setDecimals(0)
       const balanceFormatted = await contractInteractor.getTokenBalanceFormatted(accounts[1])
-      assert.equal(balanceFormatted, '123456789123456789123 DEC')
+      assert.equal(balanceFormatted, `123456789123456789123 DEC (${shortTokenAddress})`)
     })
   })
 
@@ -527,7 +620,13 @@ contract('ContractInteractor', function (accounts) {
     let contractInteractor: ContractInteractor
     before(async function () {
       const deployment: GSNContractsDeployment = { paymasterAddress: pm.address }
-      contractInteractor = new ContractInteractor({ provider, logger, deployment, maxPageSize, environment })
+      contractInteractor = new ContractInteractor({
+        provider: ethersProvider,
+        logger,
+        deployment,
+        maxPageSize,
+        environment
+      })
       await contractInteractor.init()
     })
 
@@ -569,7 +668,7 @@ contract('ContractInteractor', function (accounts) {
         }
         // @ts-ignore
         contractInteractor.maxPageSize = Number.MAX_SAFE_INTEGER
-        sinon.stub(contractInteractor, '_getPastEvents').callsFake(async function (contract: any, names: EventName[], extraTopics: Array<string[] | string | undefined>, options: PastEventOptions): Promise<any> {
+        sinon.stub(contractInteractor, '_getPastEvents').callsFake(async function (contract: any, names: EventName[], extraTopics: Array<string[] | string | null>, options: PastEventOptions): Promise<any> {
           const fromBlock = options.fromBlock as number
           const toBlock = options.toBlock as number
           if (toBlock - fromBlock > 100) {
@@ -586,8 +685,8 @@ contract('ContractInteractor', function (accounts) {
         const ret = await contractInteractor.getPastEventsForHub([], { fromBlock: 1, toBlock: 300 })
 
         assert.equal(ret.length, 300)
-        assert.equal(ret[0].event, 'event1-1-75')
-        assert.equal(ret[299].event, 'event300-226-300')
+        assert.equal(ret[0].name, 'event1-1-75')
+        assert.equal(ret[299].name, 'event300-226-300')
       })
     })
   })
@@ -599,13 +698,21 @@ contract('ContractInteractor', function (accounts) {
     let gsnTransactionDetails: GsnTransactionDetails
 
     before(async function () {
-      contractInteractor = new ContractInteractor({ provider, logger, maxPageSize, environment })
+      contractInteractor = new ContractInteractor({
+        provider: ethersProvider, logger, maxPageSize, environment
+      })
       await contractInteractor.init()
-      sinon.stub(contractInteractor.web3.eth, 'estimateGas').resolves(originalGasEstimation)
     })
 
     context('#estimateGasWithoutCalldata()', function () {
       it('should calculate gas used for calculation only', async function () {
+        const stubbedEstimateGasEthersProvider = new StaticJsonRpcProvider(currentProviderHost)
+        const contractInteractor = new ContractInteractor({
+          provider: stubbedEstimateGasEthersProvider, logger, maxPageSize, environment
+        })
+        await contractInteractor.init()
+        sinon.stub(contractInteractor.provider, 'estimateGas')
+          .resolves(BigNumber.from(originalGasEstimation))
         gsnTransactionDetails = {
           from: accounts[0],
           to: accounts[0],
@@ -614,12 +721,44 @@ contract('ContractInteractor', function (accounts) {
           maxFeePerGas: '0x1',
           maxPriorityFeePerGas: '0x1'
         }
-        const estimation = await contractInteractor.estimateGasWithoutCalldata(gsnTransactionDetails)
-        const expectedEstimation = originalGasEstimation - msgDataLength * defaultEnvironment.gtxdatanonzero
+        const estimation = await contractInteractor.estimateInnerCallGasLimit(gsnTransactionDetails)
+        const expectedEstimation = originalGasEstimation - defaultEnvironment.mintxgascost - msgDataLength * defaultEnvironment.gtxdatanonzero
         assert.equal(estimation, expectedEstimation)
       })
 
+      it('should calculate gas used for calculation only using async estimate gas', async function () {
+        const recipient = await TestRecipient.new(constants.ZERO_ADDRESS)
+        const asyncContractInteractor = new ContractInteractor(
+          {
+            environment: environments.arbitrum,
+            provider: ethersProvider,
+            logger,
+            maxPageSize,
+            deployment: { paymasterAddress: pm.address }
+          })
+        gsnTransactionDetails = {
+          from: accounts[0],
+          to: recipient.address,
+          data: '0x' + 'ff'.repeat(msgDataLength),
+          clientId: '1',
+          maxFeePerGas: '0xffffffff',
+          maxPriorityFeePerGas: '0xffffffff'
+        }
+        const estimation = await asyncContractInteractor.estimateInnerCallGasLimit(gsnTransactionDetails)
+        const expectedEstimation = 60000 // TestRecipient fallback function makes 3 SSTOREs
+        assert.isOk(estimation > expectedEstimation)
+        assert.closeTo(estimation, expectedEstimation, 10000)
+      })
+
       it('should throw if calldataGasCost estimation exceeds originalGasEstimation', async function () {
+        const stubbedEstimateGasEthersProvider = new StaticJsonRpcProvider(currentProviderHost)
+        const contractInteractor = new ContractInteractor({
+          provider: stubbedEstimateGasEthersProvider, logger, maxPageSize, environment
+        })
+        await contractInteractor.init()
+        sinon.stub(contractInteractor.provider, 'estimateGas')
+          .resolves(BigNumber.from(originalGasEstimation))
+
         gsnTransactionDetails = {
           from: accounts[0],
           to: accounts[0],
@@ -628,8 +767,8 @@ contract('ContractInteractor', function (accounts) {
           maxFeePerGas: '0x1',
           maxPriorityFeePerGas: '0x1'
         }
-        await expect(contractInteractor.estimateGasWithoutCalldata(gsnTransactionDetails))
-          .to.eventually.be.rejectedWith('calldataGasCost exceeded originalGasEstimation')
+        await expect(contractInteractor.estimateInnerCallGasLimit(gsnTransactionDetails))
+          .to.eventually.be.rejectedWith(/calldataGasCost\(.*\) exceeded originalGasEstimation\(100000\)/)
       })
     })
   })
@@ -645,7 +784,7 @@ contract('ContractInteractor', function (accounts) {
       contractInteractor = new ContractInteractor(
         {
           environment,
-          provider: web3.currentProvider as HttpProvider,
+          provider: ethersProvider,
           logger,
           maxPageSize,
           deployment: { paymasterAddress: pm.address }
@@ -657,8 +796,8 @@ contract('ContractInteractor', function (accounts) {
 
       await testRelayHub.setRelayManagerStaked(accounts[1], true)
       await testRelayHub.setRelayManagerStaked(accounts[2], true)
-      await relayReg.registerRelayServer(testRelayHub.address, 10, 11, splitRelayUrlForRegistrar('url1'), { from: accounts[1] })
-      await relayReg.registerRelayServer(testRelayHub.address, 20, 21, splitRelayUrlForRegistrar('url2'), { from: accounts[2] })
+      await relayReg.registerRelayServer(testRelayHub.address, splitRelayUrlForRegistrar('url1'), { from: accounts[1] })
+      await relayReg.registerRelayServer(testRelayHub.address, splitRelayUrlForRegistrar('url2'), { from: accounts[2] })
     })
 
     // it('should get matching numeric return value', async () => {

@@ -4,16 +4,20 @@ import {
   TestForwarderTargetInstance
 } from '@opengsn/contracts/types/truffle-contracts'
 
-// @ts-ignore
-import { EIP712TypedData, signTypedData_v4, TypedDataUtils, signTypedData, TypedMessage } from 'eth-sig-util'
+import {
+  SignTypedDataVersion,
+  TypedDataUtils,
+  TypedMessage,
+  MessageTypes,
+  signTypedData
+} from '@metamask/eth-sig-util'
 // @ts-ignore
 import ethWallet from 'ethereumjs-wallet'
 import { bufferToHex, privateToAddress, toBuffer } from 'ethereumjs-util'
 import { ether, expectRevert } from '@openzeppelin/test-helpers'
 import { toChecksumAddress } from 'web3-utils'
 import { DomainRegistered, RequestTypeRegistered } from '@opengsn/contracts/types/truffle-contracts/IForwarder'
-import { ForwardRequest } from '@opengsn/common/dist/EIP712/ForwardRequest'
-require('source-map-support').install({ errorFormatterForce: true })
+import { ForwardRequest } from '@opengsn/common'
 
 const TestForwarderTarget = artifacts.require('TestForwarderTarget')
 
@@ -109,7 +113,7 @@ contract('Forwarder', ([from]) => {
         }
       }
 
-      const localDomainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types))
+      const localDomainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4))
       const typehash = TypedDataUtils.hashType('EIP712Domain', data.types)
       const ret = await fwd.registerDomainSeparator('domainName', 'domainVer')
 
@@ -160,7 +164,7 @@ contract('Forwarder', ([from]) => {
         }
       }
 
-      domainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types))
+      domainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4))
       await fwd.registerDomainSeparator('domainName', 'domainVer')
     })
 
@@ -188,11 +192,12 @@ contract('Forwarder', ([from]) => {
         }, domainSeparator, typeHash, '0x', '0x'), 'FWD: nonce mismatch')
       })
       it('should fail on invalid signature', async () => {
-        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x'), 'invalid signature length')
-        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x123456'), 'invalid signature length')
-        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x' + '1b'.repeat(65)), 'signature mismatch')
+        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x'), 'ECDSA: invalid signature length')
+        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x123456'), 'ECDSA: invalid signature length')
+        await expectRevert(fwd.verify(req, domainSeparator, typeHash, '0x', '0x' + '1b'.repeat(65)), 'FWD: signature mismatch')
       })
     })
+
     describe('#verify success', () => {
       const req: ForwardRequest = {
         to: addr(1),
@@ -204,7 +209,7 @@ contract('Forwarder', ([from]) => {
         validUntilTime: '0'
       }
 
-      let data: EIP712TypedData
+      let data: TypedMessage<MessageTypes>
 
       before(() => {
         data = {
@@ -224,8 +229,8 @@ contract('Forwarder', ([from]) => {
       })
 
       it('should verify valid signature', async () => {
-        const sig = signTypedData_v4(senderPrivateKey, { data })
-        const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types)
+        const sig = signTypedData({ privateKey: senderPrivateKey, data, version: SignTypedDataVersion.V4 })
+        const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4)
 
         await fwd.verify(req, bufferToHex(domainSeparator), typeHash, '0x', sig)
       })
@@ -270,13 +275,13 @@ contract('Forwarder', ([from]) => {
 
         const { logs } = await fwd.registerRequestType(typeName, typeSuffix)
         const { typeHash } = (logs[0].args as RequestTypeRegistered['args'])
-        const sig = signTypedData(senderPrivateKey, { data: extendedData })
+        const sig = signTypedData({ privateKey: senderPrivateKey, data: extendedData, version: SignTypedDataVersion.V4 })
 
         // same calculation of domainSeparator as with base (no-extension)
-        const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', extendedData.domain, extendedData.types)
+        const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', extendedData.domain, extendedData.types, SignTypedDataVersion.V4)
 
         // encode entire struct, to extract "suffixData" from it
-        const encoded = TypedDataUtils.encodeData(extendedData.primaryType, extendedData.message, extendedData.types)
+        const encoded = TypedDataUtils.encodeData(extendedData.primaryType, extendedData.message, extendedData.types, SignTypedDataVersion.V4)
         // skip default params: typehash, and 6 params, so 32*7
         const suffixData = bufferToHex(encoded.slice((1 + countParams) * 32))
 
@@ -286,7 +291,7 @@ contract('Forwarder', ([from]) => {
   })
 
   describe('#execute', () => {
-    let data: EIP712TypedData
+    let data: TypedMessage<MessageTypes>
     let typeName: string
     let typeHash: string
     let recipient: TestForwarderTargetInstance
@@ -323,7 +328,7 @@ contract('Forwarder', ([from]) => {
 
       const ret = await fwd.registerDomainSeparator(data.domain.name!, data.domain.version!)
 
-      domainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types))
+      domainSeparator = bufferToHex(TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4))
 
       // validate registration matches local definition
       assert.equal(domainSeparator, (ret.logs[0].args as DomainRegistered['args']).domainSeparator)
@@ -342,8 +347,8 @@ contract('Forwarder', ([from]) => {
         gas: 1e6,
         validUntilTime: 0
       }
-      const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
-      const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types)
+      const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
+      const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4)
 
       // note: we pass request as-is (with extra field): web3/truffle can only send javascript members that were
       // declared in solidity
@@ -371,8 +376,8 @@ contract('Forwarder', ([from]) => {
         gas: funcGasEtimate,
         validUntilTime: 0
       }
-      const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
-      const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types)
+      const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
+      const domainSeparator = TypedDataUtils.hashStruct('EIP712Domain', data.domain, data.types, SignTypedDataVersion.V4)
 
       const outerGasEstimate = await testfwd.callExecute.estimateGas(fwd.address, req1, bufferToHex(domainSeparator), typeHash, '0x', sig)
 
@@ -395,7 +400,7 @@ contract('Forwarder', ([from]) => {
         gas: 1e6,
         validUntilTime: 0
       }
-      const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+      const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
       // the helper simply emits the method return values
       const ret = await testfwd.callExecute(fwd.address, req1, domainSeparator, typeHash, '0x', sig)
@@ -414,7 +419,7 @@ contract('Forwarder', ([from]) => {
         gas: 1e6.toString(),
         validUntilTime: '0'
       }
-      const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+      const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
       // the helper simply emits the method return values
       const ret = await testfwd.callExecute(fwd.address, req1, domainSeparator, typeHash, '0x', sig)
@@ -436,7 +441,7 @@ contract('Forwarder', ([from]) => {
         gas: 1e6,
         validUntilTime: '1'
       }
-      const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+      const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
       await expectRevert(fwd.execute(req1, domainSeparator, typeHash, '0x', sig), 'FWD: request expired')
     })
@@ -464,7 +469,7 @@ contract('Forwarder', ([from]) => {
           gas: 1e6,
           validUntilTime: '0'
         }
-        const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+        const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
         const ret = await testfwd.callExecute(fwd.address, req1, domainSeparator, typeHash, '0x', sig)
         assert.equal(ret.logs[0].args.success, false)
@@ -483,7 +488,7 @@ contract('Forwarder', ([from]) => {
           gas: 1e6,
           validUntilTime: 0
         }
-        const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+        const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
         const ret = await testfwd.callExecute(fwd.address, req1, domainSeparator, typeHash, '0x', sig, { value })
         assert.equal(ret.logs[0].args.success, false)
@@ -503,7 +508,7 @@ contract('Forwarder', ([from]) => {
           gas: 1e6,
           validUntilTime: 0
         }
-        const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+        const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
         const ret = await testfwd.callExecute(fwd.address, req1, domainSeparator, typeHash, '0x', sig, { value })
         assert.equal(ret.logs[0].args.error, '')
@@ -529,7 +534,7 @@ contract('Forwarder', ([from]) => {
           gas: funcEst.toString(),
           validUntilTime: 0
         }
-        const sig = signTypedData_v4(senderPrivateKey, { data: { ...data, message: req1 } })
+        const sig = signTypedData({ privateKey: senderPrivateKey, data: { ...data, message: req1 }, version: SignTypedDataVersion.V4 })
 
         // first gas estimation, with only value for the TX
         await web3.eth.sendTransaction({ from, to: fwd.address, value: value })

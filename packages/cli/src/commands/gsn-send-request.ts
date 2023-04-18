@@ -1,20 +1,24 @@
 import * as bip39 from 'ethereum-cryptography/bip39'
+
+import Web3 from 'web3'
 import commander from 'commander'
 import fs from 'fs'
-import Web3 from 'web3'
+import { PrefixedHexString } from 'ethereumjs-util'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { hdkey as EthereumHDKey } from 'ethereumjs-wallet'
 import { toHex, toWei } from 'web3-utils'
+import { HttpProvider } from 'web3-core'
 
 import {
+  Address,
   LoggerInterface
 } from '@opengsn/common'
-import { Address, Web3ProviderBaseInterface } from '@opengsn/common/dist/types/Aliases'
+
 import { GSNConfig, GSNDependencies, GSNUnresolvedConstructorInput, RelayProvider } from '@opengsn/provider'
+import { createCommandsLogger } from '@opengsn/logger/dist/CommandsWinstonLogger'
 
 import { getMnemonic, getNetworkUrl, gsnCommander } from '../utils'
 import { CommandsLogic } from '../CommandsLogic'
-import { createCommandsLogger } from '../CommandsWinstonLogger'
-import { PrefixedHexString } from 'ethereumjs-util'
 
 function commaSeparatedList (value: string, _dummyPrevious: string[]): string[] {
   return value.split(',')
@@ -35,15 +39,11 @@ async function getProvider (
   paymaster: Address,
   mnemonic: string | undefined,
   logger: LoggerInterface,
-  host: string): Promise<{ provider: Web3ProviderBaseInterface, from: Address }> {
+  host: string): Promise<{ provider: HttpProvider, from: Address }> {
   const config: Partial<GSNConfig> = {
     clientId: '0',
     paymasterAddress: paymaster
   }
-  const provider = new Web3.providers.HttpProvider(host, {
-    keepAlive: true,
-    timeout: 120000
-  })
   let from: Address
   let privateKey: PrefixedHexString | undefined
   if (commander.from != null) {
@@ -52,7 +52,7 @@ async function getProvider (
     console.log('using', from)
   } else if (mnemonic != null) {
     const hdwallet = EthereumHDKey.fromMasterSeed(
-      bip39.mnemonicToSeedSync(mnemonic)
+      Buffer.from(bip39.mnemonicToSeedSync(mnemonic))
     )
     // add mnemonic private key to the account manager as an 'ephemeral key'
     const wallet = hdwallet.deriveChild(0).getWallet()
@@ -63,6 +63,10 @@ async function getProvider (
     throw new Error('must specify either "--mnemonic" or pass "--from" account')
   }
   if (commander.directCall === true) {
+    const provider = new Web3.providers.HttpProvider(host, {
+      keepAlive: true,
+      timeout: 120000
+    })
     return { provider, from }
   } else {
     if (paymaster == null) {
@@ -71,6 +75,7 @@ async function getProvider (
     const overrideDependencies: Partial<GSNDependencies> = {
       logger
     }
+    const provider = new StaticJsonRpcProvider(host)
     const input: GSNUnresolvedConstructorInput = {
       provider,
       config,
@@ -92,7 +97,7 @@ async function getProvider (
   const nodeURL = getNetworkUrl(network)
   const logger = createCommandsLogger(commander.loglevel)
   const mnemonic = getMnemonic(commander.mnemonic)
-  const logic = new CommandsLogic(nodeURL, logger, {}, mnemonic)
+  const logic = new CommandsLogic(nodeURL, logger, {}, mnemonic, commander.derivationPath, commander.derivationIndex, commander.privateKeyHex)
   const { provider, from } = await getProvider(
     commander.to,
     commander.paymaster,
